@@ -23,14 +23,22 @@ struct kgl_pop_header {
 	uint16_t is_interim_response : 1;
 	uint16_t upstream_is_chunk : 1;
 	uint16_t post_is_chunk : 1;
+	uint16_t grpc : 1;
+	uint16_t post_finished : 1;
+	uint16_t post_ended : 1;
+	uint16_t has_content_length : 1;
+	uint16_t post_canceled : 1;
 	uint16_t interim_count : 4;
 	int keep_alive_time_out;
+	unsigned field_count;
+	int64_t response_length;
 };
 /**
 * 异步调用扩展，所以支持异步调用的扩展从该类继承
 */
 class KAsyncFetchObject : public KRedirectSource
 {
+friend int process_post_fiber(void* arg, int got);
 public:
 	KAsyncFetchObject():KAsyncFetchObject(KGL_UPSTREAM_NEED_QUEUE)
 	{		
@@ -77,7 +85,12 @@ public:
 public:
 	void WaitPostFiber(KHttpRequest* rq, kfiber *post_fiber)
 	{
-		rq->sink->shutdown();
+		if (!pop_header.post_finished && !pop_header.post_ended) {
+			pop_header.post_canceled = 1;
+			if (pop_header.grpc) rq->sink->cancel_read();
+			else rq->sink->shutdown();
+			if (client) client->shutdown();
+		}
 		int retval;
 		kfiber_join(post_fiber, &retval);
 	}

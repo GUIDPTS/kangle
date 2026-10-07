@@ -167,14 +167,20 @@ bool KHttpProxyFetchObject::build_http_header(KHttpRequest* rq)
 	}
 #endif	
 	KHttpHeader* av = rq->sink->data.get_header();
+	if (client->IsMultiStream() && KBIT_TEST(rq->sink->data.flags, RQ_HAS_CONNECTION_UPGRADE)) {
+		for (auto h=av; h; h=h->next) {
+			if (kgl_is_attr(h, _KS("Upgrade")) && !client->send_header(kgl_header_upgrade,h->buf+h->val_offset,h->val_len)) return false;
+		}
+	}
 	kgl_str_t attr;
 	while (av) {
 		kgl_get_header_name(av, &attr);
 		if (kgl_is_attr(av, _KS("Keep-Alive")) ||
+			(client->IsMultiStream() && kgl_is_attr(av, _KS("Upgrade"))) ||
 			kgl_is_attr(av, _KS("Proxy-Connection")) ||
 			kgl_is_attr(av, _KS("Connection")) ||
-			kgl_is_attr(av, _KS("TE")) ||
-			(!client->IsMultiStream() && kgl_is_attr(av, _KS("Trailer"))) ||
+			(!client->IsMultiStream() && kgl_is_attr(av, _KS("TE"))) ||
+			(!client->IsMultiStream() && !pop_header.post_is_chunk && kgl_is_attr(av, _KS("Trailer"))) ||
 			kgl_is_attr(av, _KS("Transfer-Encoding")) ||
 			(!KBIT_TEST(rq->sink->data.flags, RQ_HAS_CONNECTION_UPGRADE) && kgl_is_attr(av, _KS("Upgrade"))) ||
 			(is_connection_option(rq, attr) &&
@@ -234,6 +240,7 @@ bool KHttpProxyFetchObject::build_http_header(KHttpRequest* rq)
 	}
 	
 	int64_t content_length = in->f->body.get_left(in->body_ctx);
+	if (pop_header.post_is_chunk) content_length = -1;
 	if (rq_has_content_length(rq, content_length)) {
 		int len = int2string2(content_length, tmpbuff);
 		if (!client->send_header(kgl_expand_string("Content-Length"), tmpbuff, len)) {

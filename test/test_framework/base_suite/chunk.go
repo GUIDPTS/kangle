@@ -106,6 +106,7 @@ Network
 x-trailer-test: hello
 
 `
+	strs = strings.ReplaceAll(strs, "\n", "\r\n")
 	tmp, _ := strconv.ParseInt(r.FormValue("s"), 10, 32)
 	s := int(tmp)
 	if s == 0 {

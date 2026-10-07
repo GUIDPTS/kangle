@@ -16,6 +16,7 @@
 #include "KBigObjectContext.h"
 #endif
 #include "KHttpFieldValue.h"
+#include "KHttpValidation.h"
 #ifndef NDEBUG
 void debug_print_wsa_buf(WSABUF* buf, int bc) {
 	for (int i = 0; i < bc; i++) {
@@ -33,7 +34,8 @@ int process_post_fiber(void* arg, int got) {
 	KAsyncFetchObject* fo = (KAsyncFetchObject*)args[1];
 	delete[]args;
 	int result = (int)fo->ProcessPost(rq);
-	if (fo->client) {
+	fo->pop_header.post_finished = 1;
+	if (fo->client && (!fo->pop_header.grpc || result != KGL_END)) {
 		fo->client->shutdown();
 	}
 	return result;
@@ -158,8 +160,40 @@ KGL_RESULT KAsyncFetchObject::InternalProcess(KHttpRequest* rq, kfiber** post_fi
 	}
 	client->BindOpaque(this);
 	client->set_time_out(rq->sink->get_time_out());
+	if (client->IsMultiStream() && rq->sink->data.http_version == 0x101) {
+		for (auto h = rq->sink->data.get_header(); h; h = h->next) {
+			if (!kgl_is_attr(h, _KS("TE"))) continue;
+			KHttpFieldValue field(h->buf + h->val_offset, h->buf + h->val_offset + h->val_len);
+			do {
+				if (field.is(_KS("trailers"))) rq->sink->enable_response_trailers();
+			} while (field.next());
+		}
+	}
 	assert(rq->sink->get_selector() == kgl_get_tls_selector());
-	int64_t post_length = in->f->body.get_left(in->body_ctx);	
+	int64_t post_length = in->f->body.get_left(in->body_ctx);
+	bool need_request_end = upstream_chunk_post() && post_length == 0 && rq->sink->need_request_end();
+	if (need_request_end && client->IsMultiStream()) client->set_duplex(true);
+	if (upstream_chunk_post() && !client->IsMultiStream() && !KBIT_TEST(rq->sink->data.flags, RQ_HAS_CONNECTION_UPGRADE)) {
+		for (auto h=rq->sink->data.get_header(); h; h=h->next) {
+			if (kgl_is_attr(h, _KS("Trailer"))) pop_header.post_is_chunk = 1;
+		}
+		if ((post_length != 0 || need_request_end) && rq->sink->data.http_version >= 0x200) pop_header.post_is_chunk = 1;
+	}
+	if (client->IsMultiStream() && upstream_chunk_post()) {
+		for (auto h=rq->sink->data.get_header(); h; h=h->next) {
+			if (!kgl_is_attr(h, _KS("Content-Type"))) continue;
+			const char* type=h->buf+h->val_offset;
+			if (h->val_len >= 16 && strncasecmp(type,"application/grpc",16)==0 &&
+				(h->val_len==16 || type[16]=='+' || type[16]==';')) {
+				pop_header.grpc=1;
+				client->set_duplex(true);
+				client->set_no_delay(true);
+				rq->sink->set_no_delay(true);
+				KBIT_SET(rq->ctx.filter_flags, RF_NO_BUFFER);
+				KBIT_SET(rq->sink->data.flags, RQ_HAS_NO_CACHE);
+			}
+		}
+	}
 	if (post_length == -1 && upstream_chunk_post() && !client->IsMultiStream() && !KBIT_TEST(rq->sink->data.flags, RQ_HAS_CONNECTION_UPGRADE)) {
 		pop_header.post_is_chunk = 1;
 	}
@@ -167,7 +201,9 @@ KGL_RESULT KAsyncFetchObject::InternalProcess(KHttpRequest* rq, kfiber** post_fi
 	if (ret != KGL_OK) {
 		return ret;
 	}
-	if (post_length != 0 && !KBIT_TEST(rq->sink->data.flags, RQ_HAS_CONNECTION_UPGRADE) &&
+	if (pop_header.grpc) {
+		create_post_fiber(rq, post_fiber);
+	} else if ((post_length != 0 || need_request_end) && !KBIT_TEST(rq->sink->data.flags, RQ_HAS_CONNECTION_UPGRADE) &&
 		(!KBIT_TEST(rq->sink->data.flags, RQ_HAVE_EXPECT) || !upstream_handle_expect())) {
 		ret = ProcessPost(rq);
 		if (ret != KGL_END) {
@@ -196,7 +232,7 @@ KGL_RESULT KAsyncFetchObject::Open(KHttpRequest* rq, kgl_input_stream* in, kgl_o
 	this->in = in;
 	this->out = out;
 	KGL_RESULT result = InternalProcess(rq, &post_fiber);
-	if (result == KGL_ECAN_RETRY_SOCKET_BROKEN && !client->IsNew() && !rq->ctx.read_huped &&
+	if (result == KGL_ECAN_RETRY_SOCKET_BROKEN && post_fiber == NULL && !client->IsNew() && !rq->ctx.read_huped &&
 		(!KBIT_TEST(rq->sink->data.flags, RQ_HAS_READ_POST) || rq->ctx.request_body_replayable)) {
 		/** only pooled upstream and can_retry_socket_broken error and not read_huped happen
 		* then retry use a new upstream(not pool upstream).
@@ -263,6 +299,7 @@ KGL_RESULT KAsyncFetchObject::ReadBody(KHttpRequest* rq) {
 		char* buf = (char*)getUpstreamBuffer(&len);
 		int got = client->read(buf, len);
 		if (got == 0) {
+			expectDone(rq);
 			KHttpHeader* header = client->get_trailer();
 			while (header) {
 				kgl_str_t name;
@@ -349,8 +386,13 @@ KGL_RESULT KAsyncFetchObject::ProcessPost(KHttpRequest* rq) {
 		if (ret != KGL_OK) {
 			return ret;
 		}
+		if (pop_header.post_ended) return KGL_END;
 	}
-	return KGL_END;
+	if (!rq->sink->finish_read_body()) return KGL_EDATA_FORMAT;
+	KGL_RESULT ret = PostResult(rq, 0);
+	if (ret != KGL_OK) return ret;
+	ret = SendPost(rq);
+	return ret == KGL_OK ? KGL_END : ret;
 }
 KGL_RESULT KAsyncFetchObject::SendHeader(KHttpRequest* rq) {
 	if (buffer == NULL) {
@@ -363,7 +405,7 @@ KGL_RESULT KAsyncFetchObject::SendHeader(KHttpRequest* rq) {
 	if (buffer->startRead() == 0) {
 		return KGL_OK;
 	}
-	client->set_delay();
+	if (!pop_header.grpc) client->set_delay();
 	int length = buffer->getLen();
 	int result = client->write_all(buffer->getHead(), length);
 	if (result != 0) {
@@ -378,6 +420,11 @@ KGL_RESULT KAsyncFetchObject::PostResult(KHttpRequest* rq, int got) {
 	assert(buffer != NULL);
 	//printf("handleReadPost got=[%d] protocol=[%d]\n",got,(int)rq->sink->data.http_major);
 	if (got == 0 && !KBIT_TEST(rq->sink->data.flags, RQ_CONNECTION_UPGRADE)) {
+		if (in->f->body.get_left(in->body_ctx) > 0) {
+			rq->sink->shutdown();
+			return KGL_EDATA_FORMAT;
+		}
+		pop_header.post_ended = 1;
 		KHttpHeader* trailer = rq->sink->get_trailer();
 		if (pop_header.post_is_chunk) {
 			buffer->WSTR("0\r\n");
@@ -391,7 +438,7 @@ KGL_RESULT KAsyncFetchObject::PostResult(KHttpRequest* rq, int got) {
 				buffer->write_all(trailer->buf + trailer->val_offset, trailer->val_len);
 				buffer->WSTR("\r\n");
 			} else {
-				client->send_trailer(name.data, (hlen_t)name.len, trailer->buf + trailer->val_offset, trailer->val_len);
+				if (!client->send_trailer(name.data, (hlen_t)name.len, trailer->buf + trailer->val_offset, trailer->val_len)) return KGL_EDATA_FORMAT;
 			}
 			trailer = trailer->next;
 		}
@@ -415,7 +462,7 @@ KGL_RESULT KAsyncFetchObject::PostResult(KHttpRequest* rq, int got) {
 		return result == KGL_OK ? KGL_EHAS_SEND_HEADER : result;
 	}
 	if (got <= 0) {
-		rq->sink->shutdown();
+		if (!pop_header.post_canceled) rq->sink->shutdown();
 		return KGL_ESOCKET_BROKEN;
 	}
 	buffer->writeSuccess(got);
@@ -461,7 +508,7 @@ void KAsyncFetchObject::create_post_fiber(KHttpRequest* rq, kfiber** post_fiber)
 	}
 }
 KGL_RESULT KAsyncFetchObject::on_read_head_success(KHttpRequest* rq, kfiber** post_fiber) {
-	if (pop_header.is_interim_response && pop_header.proto == Proto_http) {
+	if (pop_header.is_interim_response && (pop_header.proto == Proto_http || pop_header.proto == Proto_spdy)) {
 		// Only 100 permits sending an Expect body; 102/103 must keep waiting.
 		if (++pop_header.interim_count > 8) {
 			return KGL_EDATA_FORMAT;
@@ -532,7 +579,7 @@ KGL_RESULT KAsyncFetchObject::PushHeaderFinished(KHttpRequest* rq) {
 }
 void KAsyncFetchObject::PushStatus(KHttpRequest* rq, int status_code) {
 	if (status_code == 100 ||
-		(pop_header.proto == Proto_http && status_code > 100 && status_code < 200 && status_code != 101)) {
+		((pop_header.proto == Proto_http || pop_header.proto == Proto_spdy) && status_code > 100 && status_code < 200 && status_code != 101)) {
 		pop_header.is_100_continue = status_code == 100;
 		pop_header.is_interim_response = 1;
 		return;
@@ -564,7 +611,9 @@ KGL_RESULT KAsyncFetchObject::PushHeader(KHttpRequest* rq, const char* attr, int
 		}
 	}
 	if (request_line && pop_header.proto == Proto_http) {
-		if (strncasecmp(attr, "HTTP/", 5) == 0) {
+		if (attr_len==8 && (memcmp(attr,"HTTP/1.0",8)==0 || memcmp(attr,"HTTP/1.1",8)==0) &&
+			val_len>=3 && val[0]>='1' && val[0]<='5' && val[1]>='0' && val[1]<='9' && val[2]>='0' && val[2]<='9' &&
+			(val_len==3 || val[3]==' ')) {
 			const char* dot = strchr(attr + 5, '.');
 			if (dot == NULL) {
 				return KGL_EDATA_FORMAT;
@@ -583,8 +632,10 @@ KGL_RESULT KAsyncFetchObject::PushHeader(KHttpRequest* rq, const char* attr, int
 			PushStatus(rq, status_code);
 			return KGL_OK;
 		}
+		return KGL_EDATA_FORMAT;
 	}
-	if (pop_header.is_interim_response && pop_header.proto == Proto_http) {
+	if (++pop_header.field_count > KHTTP_MAX_FIELD_COUNT || !khttp_valid_field(attr, attr_len, val, val_len)) return KGL_EDATA_FORMAT;
+	if (pop_header.is_interim_response && (pop_header.proto == Proto_http || pop_header.proto == Proto_spdy)) {
 		//headers of interim response are not forwarded.
 		return KGL_OK;
 	}
@@ -618,11 +669,14 @@ KGL_RESULT KAsyncFetchObject::PushHeader(KHttpRequest* rq, const char* attr, int
 		return KGL_OK;
 	case kgl_header_transfer_encoding:
 	{
-		if (kgl_mem_case_same(val, val_len, _KS("chunked"))) {
+		if (kgl_mem_case_same(val, val_len, _KS("chunked")) && !pop_header.upstream_is_chunk) {
 			pop_header.upstream_is_chunk = 1;
+			// Preserve compatibility with HTTP/1 origins sending both fields.
+			// Discard Content-Length, decode chunked, and retire this connection.
+			if (pop_header.has_content_length) pop_header.keep_alive_time_out = -1;
 			return KGL_OK;
 		}
-		break;
+		return KGL_EDATA_FORMAT;
 	}
 	case kgl_header_keep_alive:
 	{
@@ -639,7 +693,12 @@ KGL_RESULT KAsyncFetchObject::PushHeader(KHttpRequest* rq, const char* attr, int
 	}
 	case kgl_header_content_length:
 	{
-		int64_t content_length = kgl_atol((u_char*)val, val_len);
+		int64_t content_length;
+		if (!khttp_parse_length(val, val_len, &content_length) ||
+			(pop_header.has_content_length && content_length != pop_header.response_length)) return KGL_EDATA_FORMAT;
+		if (pop_header.upstream_is_chunk) pop_header.keep_alive_time_out = -1;
+		pop_header.has_content_length=1;
+		pop_header.response_length=content_length;
 		if (rq->sink->data.meth == METH_HEAD) {
 			rq->ctx.left_read = 0;
 		} else {
@@ -665,7 +724,7 @@ kgl_parse_result KAsyncFetchObject::parse_unknow_header(KHttpRequest* rq, char**
 		case kgl_parse_continue:
 			return kgl_parse_continue;
 		case kgl_parse_success:
-			if (KGL_OK != PushHeader(rq, rs.attr, rs.attr_len, rs.val, rs.val_len, rs.request_line)) {
+			if (rs.bad_name || KGL_OK != PushHeader(rq, rs.attr, rs.attr_len, rs.val, rs.val_len, rs.request_line)) {
 				return kgl_parse_error;
 			}
 			//printf("attr=[%s] val=[%s]\n", rs.attr, rs.val);

@@ -17,6 +17,8 @@
 #include "KFileName.h"
 #include "KHttpLib.h"
 #include "KHttpHeaderManager.h"
+#include "KHttpValidation.h"
+#include "KUrl.h"
 
 static void check_header_tail() {
     KHttpHeaderManager headers = {};
@@ -134,8 +136,58 @@ static void check_dechunk_limits() {
     assert(decode("\n") == KDechunkResult::Failed);
     assert(decode("1\r\nx\r\n;ext\r\n") == KDechunkResult::Failed);
     assert(decode("1;ext=1\r\nx\r\n0\r\n\r\n") == KDechunkResult::End);
-    assert(decode("0\r\nX\r\n") == KDechunkResult::Continue);
-    assert(decode("0\r\nX\r\n\r\n") == KDechunkResult::End);
+    assert(decode("0\r\nX\r\n") == KDechunkResult::Failed);
+    assert(decode("0\r\nX\r\n\r\n") == KDechunkResult::Failed);
+    for (const char* input : {"1\nx\n0\n\n", "1\r\nxBAD\n0\r\n\r\n", "1garbage\r\nx\r\n0\r\n\r\n",
+            "0\r\nContent-Length: 0\r\n\r\n", "0\r\nX : bad\r\n\r\n", "1;x=\"unclosed\r\n"}) {
+        assert(decode(input) == KDechunkResult::Failed);
+    }
+    KDechunkEngine fragmented;
+    std::string input="1;foo=\"a\\\"b\"\r\nx\r\n0\r\ngrpc-status: 0\r\n\r\nNEXT";
+    bool ended=false;
+    std::string body, trailer;
+    for (size_t i=0; i<input.size() && !ended; ++i) {
+        const char* hot=input.data()+i;
+        const char* end=hot+1;
+        while (hot < end) {
+            const char* piece=nullptr;
+            int len=32;
+            auto result=fragmented.dechunk(&hot,end,&piece,&len);
+            assert(result!=KDechunkResult::Failed);
+            if (result==KDechunkResult::Success) body.append(piece,len);
+            if (result==KDechunkResult::Trailer) trailer.assign(piece,len);
+            if (result==KDechunkResult::End) ended=true;
+        }
+    }
+    assert(ended && body=="x" && trailer=="grpc-status: 0");
+}
+
+static void check_protocol_validation() {
+    KHttpHeaderValidation headers{};
+    assert(headers.field(_KS(":method"), _KS("POST"), true, true));
+    assert(headers.field(_KS(":scheme"), _KS("https"), true, true));
+    assert(headers.field(_KS(":path"), _KS("/grpc.Service/Call"), true, true));
+    assert(headers.field(_KS(":authority"), _KS("localhost"), true, true));
+    assert(headers.field(_KS("te"), _KS("trailers"), true, true));
+    assert(headers.complete(true));
+    assert(!headers.field(_KS(":path"), _KS("/duplicate"), true, true));
+    for (const char* name : {"connection", "keep-alive", "transfer-encoding", "upgrade", "X-Upper"}) {
+        headers.reset();
+        assert(!headers.field(name, (int)strlen(name), _KS("bad"), true, true));
+    }
+    assert(khttp_valid_trailer(_KS("grpc-status"), _KS("0"), true));
+    assert(!khttp_valid_trailer(_KS("host"), _KS("evil")));
+    int64_t n;
+    assert(khttp_parse_length(_KS("9223372036854775807"), &n) && n==INT64_MAX);
+    assert(!khttp_parse_length(_KS("9223372036854775808"), &n));
+    for (const char* host : {"", "x:0", "x:65536", "x:80garbage", "x:", "x@y", "x/path", "[::1]junk", "::1"}) {
+        KUrl url(false);
+        assert(!parse_url_host(&url,host,strlen(host)));
+    }
+    for (const char* host : {"localhost", "example.test:443", "[::1]:80"}) {
+        KUrl url(false);
+        assert(parse_url_host(&url,host,strlen(host)));
+    }
 }
 
 static void check_header_names() {
@@ -224,6 +276,7 @@ int main() {
     check_fields_and_dates();
     check_cache_flush_failure();
     check_dechunk_limits();
+    check_protocol_validation();
     check_header_names();
     check_fragmented_fold();
     check_xml();

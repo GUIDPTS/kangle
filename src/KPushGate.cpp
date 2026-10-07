@@ -2,6 +2,7 @@
 #include "http.h"
 #include "ksapi.h"
 #include "KDechunkEngine.h"
+#include "KHttpValidation.h"
 #include "KBufferFetchObject.h"
 #include "KVectorBufferFetchObject.h"
 #include "HttpFiber.h"
@@ -257,6 +258,8 @@ KGL_RESULT st_write_message(kgl_output_stream_ctx* st, uint16_t status_code, con
 	return handle_error(rq, status_code, (const char*)msg);
 }
 KGL_RESULT common_write_trailer(KHttpRequest* rq, const char* attr, hlen_t attr_len, const char* val, hlen_t val_len) {
+	if (!khttp_valid_trailer(attr, attr_len, val, val_len)) return KGL_EDATA_FORMAT;
+	if (rq->ctx.obj) KBIT_SET(rq->ctx.obj->index.flags, FLAG_DEAD);
 	if (rq->ctx.body.ctx) {
 		KGL_RESULT result = rq->ctx.body.f->flush(rq->ctx.body.ctx);
 		if (result != KGL_OK) {
