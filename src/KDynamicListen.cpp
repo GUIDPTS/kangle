@@ -78,6 +78,7 @@ void KListen::sync_flag(kgl_ssl_ctx *ssl_ctx)
 		h3_server->shutdown();
 		h3_server->release();
 		h3_server = nullptr;
+		KBIT_CLR(server->flags, WORK_MODEL_ALT_H3);
 	} else if (key->h3 > 0 && key->ssl>0 && h3_server == nullptr) {
 		if (ssl_ctx == nullptr) {
 			ssl_ctx = server->ssl_ctx;
@@ -87,7 +88,7 @@ void KListen::sync_flag(kgl_ssl_ctx *ssl_ctx)
 			return;
 		}
 		KBIT_SET(ssl_ctx->alpn, KGL_ALPN_HTTP3);
-		h3_server = kgl_h3_new_server(key->ip.c_str(), key->port, key->get_socket_flag(), ssl_ctx, server->flags);
+		h3_server = kgl_h3_new_server(key->ip.c_str(), key->port, key->get_socket_flag(), ssl_ctx, server->flags & ~KGL_SERVER_START);
 		if (h3_server == nullptr) {
 			klog(KLOG_ERR, "cann't new h3 server on [%s:%d]\n", key->ip.c_str(), key->port);
 			return;
@@ -99,6 +100,10 @@ void KListen::sync_flag(kgl_ssl_ctx *ssl_ctx)
 		}
 		vhc->addRef();
 		h3_server->bind_data(kgl_release_vh_container, vhc);
+		// An existing HTTPS listener does not go through init_listen again.
+		if (KBIT_TEST(server->flags, KGL_SERVER_START)) {
+			kgl_set_flag((uint32_t *)&server->flags, WORK_MODEL_ALT_H3, h3_server->start());
+		}
 		return;
 	}
 	if (h3_server) {
