@@ -125,6 +125,8 @@ public:
 		uint32_t request_body_replayable : 1;
 		//precondition类型
 		uint32_t precondition_flag : 3;
+		uint32_t early_hints : 2;
+		uint32_t early_hints_set : 1;
 		int64_t left_read;	//final fetchobj 使用
 		KHttpObject* obj;
 		KHttpObject* old_obj;
@@ -303,7 +305,9 @@ public:
 	}
 	void parse_connection(const char* val, const char* end);
 	void readhup() {
-		if (!conf.read_hup) {
+		// QUIC stream cancellation is explicit and must cancel upstream work,
+		// independently of the optional TCP read-hangup monitoring setting.
+		if (!conf.read_hup && sink->data.http_version != 0x300) {
 			return;
 		}
 		sink->readhup(this, on_sink_readhup);

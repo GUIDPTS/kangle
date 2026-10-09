@@ -141,6 +141,12 @@ func main() {
 		must(os.Mkdir(filepath.Join(root, d), 0755))
 	}
 	copyFile(os.Args[1], root+"/bin/kangle")
+	for _, name := range []string{"libstdc++.so.6", "libgcc_s.so.1"} {
+		source := filepath.Join(filepath.Dir(os.Args[1]), name)
+		if _, err := os.Stat(source); err == nil {
+			copyFile(source, filepath.Join(root, "bin", name))
+		}
+	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	must(err)
 	cert := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost", "tls.test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}

@@ -677,6 +677,12 @@ void KVirtualHostManage::getVhDetail(KWStream& s, KVirtualHost* vh, bool edit) {
 		<< "</td><td>";
 	s << "<input name='browse' type='checkbox' value='on'"
 		<< ((vh && vh->browse) ? "checked" : "") << ">" << klang["browse"];
+	s << " Early Hints: <select name='early_hints'>";
+	const char* hints_modes[] = { "off", "on", "h2" };
+	for (unsigned i = 0; i < 3; ++i) {
+		s << "<option value='" << hints_modes[i] << "'" << ((vh ? vh->early_hints : 0) == i ? " selected" : "") << ">" << hints_modes[i] << "</option>";
+	}
+	s << "</select>";
 
 #ifdef ENABLE_VH_FLOW
 	s << "<input name='fflow' type='checkbox' value='1'"

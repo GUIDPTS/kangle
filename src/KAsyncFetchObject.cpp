@@ -17,6 +17,7 @@
 #endif
 #include "KHttpFieldValue.h"
 #include "KHttpValidation.h"
+#include "KVirtualHost.h"
 #ifndef NDEBUG
 void debug_print_wsa_buf(WSABUF* buf, int bc) {
 	for (int i = 0; i < bc; i++) {
@@ -126,6 +127,10 @@ void KAsyncFetchObject::on_readhup(KHttpRequest* rq) {
 	return;
 }
 void KAsyncFetchObject::ResetBuffer() {
+	free_header_list(early_headers.steal_header());
+	early_bytes = 0;
+	early_overflow = false;
+	forward_early_hints = false;
 	if (buffer) {
 		delete buffer;
 		buffer = NULL;
@@ -507,16 +512,73 @@ void KAsyncFetchObject::create_post_fiber(KHttpRequest* rq, kfiber** post_fiber)
 		kfiber_create(process_post_fiber, args, 2, http_config.fiber_stack_size, post_fiber);
 	}
 }
+KGL_RESULT KAsyncFetchObject::StoreEarlyHint(const char* name, int name_len, const char* value, int value_len) {
+	if (!forward_early_hints || early_overflow) return KGL_OK;
+	// An oversized informational block can be ignored without losing the final response.
+	early_bytes += (size_t)name_len + value_len + 4;
+	if (early_bytes > 65536) {
+		early_overflow = true;
+		free_header_list(early_headers.steal_header());
+		return KGL_OK;
+	}
+	return early_headers.add_header(name, name_len, value, value_len) ? KGL_OK : KGL_EDATA_FORMAT;
+}
+KGL_RESULT KAsyncFetchObject::ForwardEarlyHints(KHttpRequest* rq) {
+	KHttpHeaderManager filtered{};
+	if (forward_early_hints && !early_overflow && !rq->sink->data.status_code) {
+		for (auto h = early_headers.header; h; h = h->next) {
+			const char* name = h->buf;
+			int len = h->name_len;
+			bool skip = khttp_field_equal(name, len, "connection") || khttp_field_equal(name, len, "keep-alive") ||
+				khttp_field_equal(name, len, "proxy-connection") || khttp_field_equal(name, len, "upgrade") ||
+				khttp_field_equal(name, len, "transfer-encoding") || khttp_field_equal(name, len, "content-length") ||
+				khttp_field_equal(name, len, "trailer") || khttp_field_equal(name, len, "te");
+			// A HTTP/1 origin can nominate additional hop-by-hop fields.
+			for (auto c = early_headers.header; !skip && c; c = c->next) {
+				if (!kgl_is_attr(c, _KS("Connection"))) continue;
+				const char* pos = c->buf + c->val_offset;
+				const char* end = pos + c->val_len;
+				while (pos < end) {
+					const char* comma = (const char*)memchr(pos, ',', end - pos);
+					if (!comma) comma = end;
+					const char* token_end = comma;
+					while (pos < token_end && (*pos == ' ' || *pos == '\t')) ++pos;
+					while (token_end > pos && (token_end[-1] == ' ' || token_end[-1] == '\t')) --token_end;
+					if (token_end - pos == len && strncasecmp(name, pos, len) == 0) skip = true;
+					pos = comma == end ? end : comma + 1;
+				}
+			}
+			if (!skip && !filtered.add_header(name, len, h->buf + h->val_offset, h->val_len)) {
+				free_header_list(filtered.steal_header());
+				return KGL_EDATA_FORMAT;
+			}
+		}
+	}
+	bool success = true;
+	if (forward_early_hints && !early_overflow && !rq->sink->data.status_code) {
+		success = rq->sink->response_early_hints(filtered.header);
+	}
+	free_header_list(filtered.steal_header());
+	free_header_list(early_headers.steal_header());
+	early_bytes = 0;
+	early_overflow = false;
+	forward_early_hints = false;
+	if (!success) rq->ctx.read_huped = 1;
+	return success ? KGL_OK : KGL_ESOCKET_BROKEN;
+}
 KGL_RESULT KAsyncFetchObject::on_read_head_success(KHttpRequest* rq, kfiber** post_fiber) {
 	if (pop_header.is_interim_response && (pop_header.proto == Proto_http || pop_header.proto == Proto_spdy)) {
 		// Only 100 permits sending an Expect body; 102/103 must keep waiting.
 		if (++pop_header.interim_count > 8) {
 			return KGL_EDATA_FORMAT;
 		}
+		KGL_RESULT hint_result = ForwardEarlyHints(rq);
+		if (hint_result != KGL_OK) return hint_result;
 		bool send_post = pop_header.is_100_continue &&
 			KBIT_TEST(rq->sink->data.flags, RQ_HAVE_EXPECT) && *post_fiber == nullptr;
 		pop_header.is_interim_response = 0;
 		pop_header.is_100_continue = 0;
+		pop_header.field_count = 0;
 		if (send_post) {
 			KGL_RESULT ret = ProcessPost(rq);
 			if (ret != KGL_END) {
@@ -568,7 +630,12 @@ KGL_RESULT KAsyncFetchObject::PushHeaderFinished(KHttpRequest* rq) {
 		rq->ctx.left_read = -1;
 	}
 	assert(body.ctx == nullptr);
-	auto result =  out->f->write_header_finish(out->ctx, rq->ctx.left_read, &body);
+	// HEAD has no response body, but its Content-Length describes a GET.
+	int64_t response_length = rq->ctx.left_read;
+	if (rq->sink->data.meth == METH_HEAD && !pop_header.no_body) {
+		response_length = pop_header.has_content_length ? pop_header.response_length : -1;
+	}
+	auto result = out->f->write_header_finish(out->ctx, response_length, &body);
 	if (result != KGL_OK) {
 		return result;
 	}
@@ -582,6 +649,15 @@ void KAsyncFetchObject::PushStatus(KHttpRequest* rq, int status_code) {
 		((pop_header.proto == Proto_http || pop_header.proto == Proto_spdy) && status_code > 100 && status_code < 200 && status_code != 101)) {
 		pop_header.is_100_continue = status_code == 100;
 		pop_header.is_interim_response = 1;
+		unsigned mode = rq->ctx.early_hints;
+		if (!rq->ctx.early_hints_set) {
+			auto svh = kangle::get_virtual_host(rq);
+			if (svh) mode = svh->vh->early_hints;
+		}
+		forward_early_hints = status_code == 103 && mode &&
+			!rq->ctx.internal && !rq->ctx.simulate && !rq->ctx.no_http_header &&
+			(rq->sink->data.http_version == 0x200 || (mode == 1 && rq->sink->data.http_version == 0x300) ||
+			 (mode == 1 && rq->sink->data.http_version == 0x101));
 		return;
 	}
 	pop_header.status_send = 1;
@@ -607,6 +683,11 @@ KGL_RESULT KAsyncFetchObject::PushHeader(KHttpRequest* rq, const char* attr, int
 			return KGL_OK;
 		}
 		default:
+			if (pop_header.is_interim_response && (pop_header.proto == Proto_http || pop_header.proto == Proto_spdy)) {
+				if (attr_len < 0 || attr_len >= (int)kgl_header_unknow) return KGL_EDATA_FORMAT;
+				const auto& name = kgl_header_type_string[attr_len].value;
+				return PushHeader(rq, name.data, (int)name.len, val, val_len, false);
+			}
 			return out->f->write_header(out->ctx, (kgl_header_type)attr_len, val, val_len);
 		}
 	}
@@ -636,8 +717,7 @@ KGL_RESULT KAsyncFetchObject::PushHeader(KHttpRequest* rq, const char* attr, int
 	}
 	if (++pop_header.field_count > KHTTP_MAX_FIELD_COUNT || !khttp_valid_field(attr, attr_len, val, val_len)) return KGL_EDATA_FORMAT;
 	if (pop_header.is_interim_response && (pop_header.proto == Proto_http || pop_header.proto == Proto_spdy)) {
-		//headers of interim response are not forwarded.
-		return KGL_OK;
+		return StoreEarlyHint(attr, attr_len, val, val_len);
 	}
 	if (pop_header.proto == Proto_spdy && *attr == ':') {
 		attr++;

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from runtime_fixture import copy_runtime
 import h2.config
 import h2.connection
 import h2.events
@@ -73,13 +74,17 @@ class HttpOrigin(socketserver.StreamRequestHandler):
             first = self.rfile.readline()
             if not first:
                 return
-            _, path, _ = first.split(b' ', 2)
+            method, path, _ = first.split(b' ', 2)
             headers = fields(self.rfile)
             trailers = {}
             if headers.get(b'transfer-encoding') == b'chunked':
                 body, trailers = chunks(self.rfile)
             else:
                 body = exact(self.rfile, int(headers.get(b'content-length', b'0')))
+            if method == b'HEAD':
+                self.wfile.write(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n')
+                self.wfile.flush()
+                continue
             if path == b'/bad-length':
                 self.wfile.write(b'HTTP/1.1 200 OK\r\nContent-Length: 1junk\r\n\r\nx')
                 return
@@ -113,6 +118,9 @@ class H2Origin(socketserver.BaseRequestHandler):
             for event in cn.receive_data(data):
                 if isinstance(event, h2.events.RequestReceived):
                     requests[event.stream_id] = dict(event.headers)
+                    if requests[event.stream_id][':path'] == '/early-response':
+                        cn.send_headers(event.stream_id, [(':status', '413'), ('content-length', '2')])
+                        cn.send_data(event.stream_id, b'no', end_stream=True)
                 elif isinstance(event, h2.events.TrailersReceived):
                     requests[event.stream_id].update(event.headers)
                 elif isinstance(event, h2.events.DataReceived):
@@ -129,7 +137,9 @@ class H2Origin(socketserver.BaseRequestHandler):
                 elif isinstance(event, h2.events.StreamEnded):
                     sid = event.stream_id
                     path = requests[sid][':path']
-                    if path == '/duplex':
+                    if path == '/early-response':
+                        pass
+                    elif path == '/duplex':
                         cn.send_headers(sid, [('grpc-status', '0'), ('grpc-message', 'done%20ok')], end_stream=True)
                     elif path == '/trailers-only':
                         cn.send_headers(sid, [(':status', '200'), ('content-type', 'application/grpc'), ('grpc-status', '7'), ('grpc-message', 'denied')], end_stream=True)
@@ -213,6 +223,7 @@ def run(binary):
         for name in ['etc', 'ext', 'bin', 'var', 'tmp', 'log', 'www']:
             os.makedirs(root+'/'+name)
         shutil.copy2(binary, root+'/bin/kangle')
+        copy_runtime(binary, root+'/bin')
         for handler in [HttpOrigin, H2Origin]:
             s = Server(('127.0.0.1', 0), handler)
             s.lock, s.resets = threading.Lock(), 0
@@ -267,6 +278,11 @@ def run(binary):
         for path, body in [('trailers', b'abc'), ('empty', b'')]:
             result = raw(('GET /'+path+' HTTP/1.1\r\nHost: http.test\r\nConnection: close\r\n\r\n').encode())
             check(result[0]==200 and result[2]==body and result[3].get(b'x-meta')==b'ok', 'HTTP/1 response '+path+' and trailer order')
+        head = http.client.HTTPConnection('127.0.0.1', frontend, timeout=5)
+        head.request('HEAD', '/', headers={'Host': 'http.test'})
+        response = head.getresponse()
+        check(response.status==200 and response.getheader('Content-Length')=='2' and response.read()==b'', 'HTTP/1 upstream HEAD preserves GET length')
+        head.close()
         result = raw(b'POST /upload HTTP/1.1\r\nHost: http.test\r\nTransfer-Encoding: chunked\r\nTrailer: X-Upload\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\nX-Upload: request-ok\r\n\r\n')
         check(result[2]==b'abc' and result[3].get(b'x-meta')==b'request-ok', 'HTTP/1 request and response trailers')
         for bad in [b'Host: http.test\r\nHost: http.test', b'Host: x:65536', b'Host: http.test\r\nContent-Length: 1\r\nTransfer-Encoding: chunked', b'Host: http.test\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked', b'Host: http.test\r\nX-Bad: a\x00b', b'Host: http.test\r\nContent-Length : 0', b'Host: http.test\r\nContent-Length: -1']:
@@ -349,8 +365,46 @@ def run(binary):
             check(sid in cn.reset, 'HTTP/2 invalid fields reset stream '+repr(extra))
             cn.sock.close()
 
+        # Outbound DATA resets the idle budget, but control-only traffic must
+        # still be rejected. No PING replies are queued by ACK-only PINGs.
+        for label, kind, flags, payload in [('WINDOW_UPDATE', 8, 0, b'\x00\x00\x00\x01'),
+                ('PING ACK', 6, 1, b'12345678'), ('empty DATA', 0, 0, b'')]:
+            flood = H2Client(frontend)
+            sid = flood.request('/duplex', end=False) if kind == 0 else 0
+            frame = len(payload).to_bytes(3, 'big')+bytes([kind, flags])+sid.to_bytes(4, 'big')+payload
+            flood.sock.sendall(frame*1100)
+            flood.sock.settimeout(2)
+            closed = False
+            received = b''
+            try:
+                while not closed:
+                    incoming = flood.sock.recv(65536)
+                    if not incoming:
+                        closed = True
+                        break
+                    received += incoming
+                    while len(received) >= 9:
+                        length = int.from_bytes(received[:3], 'big')
+                        if len(received) < 9+length:
+                            break
+                        if received[3] == 7:  # GOAWAY
+                            closed = True
+                        received = received[9+length:]
+            except (ConnectionResetError, BrokenPipeError):
+                closed = True
+            finally:
+                flood.sock.close()
+            check(closed, 'HTTP/2 idle flood rejected: '+label)
+        healthy = H2Client(frontend)
+        sid = healthy.request('/known')
+        healthy.done(sid)
+        check(healthy.body.get(sid) == b'abc', 'HTTP/2 healthy connection after control-frame floods')
+        healthy.sock.close()
+
         def tls(version, target):
             executable=os.environ.get('KANGLE_TEST_OPENSSL','openssl')
+            if version == 'tls1_3':
+                executable=os.environ.get('KANGLE_TEST_OPENSSL13', executable)
             result=subprocess.run([executable,'s_client','-ign_eof','-connect','127.0.0.1:'+str(target),'-servername','http.test','-'+version], input=b'GET / HTTP/1.1\r\nHost: http.test\r\nConnection: close\r\n\r\n',stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=8)
             with open(root+'/tls-'+str(target)+'-'+version+'.log','wb') as f:
                 f.write(result.stdout)

@@ -131,6 +131,7 @@
 #include "KTimeoutMark.h"
 #include "KKeepConnectionAcl.h"
 #include "KConnectionCloseMark.h"
+#include "KEarlyHintsMark.h"
 #include "KMinObjVerifiedMark.h"
 #include "KTryFileAcl.h"
 #include "KMapRedirectMark.h"
@@ -600,6 +601,7 @@ void KAccess::loadModel() {
 #endif
 	addMarkModel(RESPONSE, new KMarkMark());
 	addMarkModel(REQUEST_RESPONSE, new KConnectionCloseMark());
+	addMarkModel(REQUEST, new KEarlyHintsMark());
 #ifndef HTTP_PROXY
 	register_builtin_filter_models();
 #endif

@@ -202,6 +202,7 @@ def child_main(port):
 
 
 def run(binary):
+    from runtime_fixture import copy_runtime
     servers = []
     proc = None
     children = set()
@@ -219,6 +220,7 @@ def run(binary):
         for name in ['etc', 'ext', 'bin', 'var', 'tmp', 'log', 'www/static']:
             os.makedirs(os.path.join(root, name))
         shutil.copy2(binary, root + '/bin/kangle')
+        copy_runtime(binary, root+'/bin')
         for name in ['extworker', 'webdav.so']:
             shutil.copy2(os.path.join(os.path.dirname(binary), name), root + '/bin/' + name)
         shutil.copy2(__file__, root + '/bin/origin.py')
@@ -380,6 +382,7 @@ def run(binary):
         for name in ['etc', 'var', 'tmp', 'bin']:
             os.makedirs(invalid_root + '/' + name)
         shutil.copy2(binary, invalid_root + '/bin/kangle')
+        copy_runtime(binary, invalid_root+'/bin')
         with open(invalid_root + '/etc/config.xml', 'w') as f:
             f.write("<config><worker_thread>1</worker_thread><listen ip='127.0.0.1' port='%d' type='http'/>"
                     "<run_as user='kangle-regression-user-not-present'/></config>" % free_port())

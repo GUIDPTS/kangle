@@ -143,26 +143,42 @@ make -j"$(nproc)"
 
 ## 编译 HTTP/3
 
-HTTP/3 同时需要 BoringSSL 和 LSQUIC 源码。建议将它们放在 kangle 仓库外，然后将路径传给
-CMake。LSQUIC 本身还有一些平台编译依赖，请先根据所用系统安装这些依赖。
+HTTP/3 同时需要 BoringSSL 和 LSQUIC 源码、CMake 3.16 或更高版本，以及支持 C11/C++17
+的编译器。建议将依赖放在 kangle 仓库外。已验证的版本为 LSQUIC **v4.10.0** 和
+BoringSSL **0.20250807.0**（提交 `e20e8486554098772673b55ea76bb003d0b330e5`）。
+配置前必须应用仓库提供的两项 LSQUIC 补丁；CMake 会检查所需的头部 API 和补丁标记。
+下面的 BoringSSL `checkout` 是可选的，用于复现已验证的构建，Kangle 并未限制必须使用该提交。
+如需使用新版，可省略该命令或选择其他提交，然后重新编译并运行 TLS/HTTP/3 回归测试。
 
 ```bash
 mkdir kangle-http3 && cd kangle-http3
 git clone --recursive https://github.com/google/boringssl.git
-git clone --recursive https://github.com/litespeedtech/lsquic.git
+# 可选：复现已验证的 BoringSSL 版本。
+git -C boringssl checkout e20e8486554098772673b55ea76bb003d0b330e5
+git clone --recursive --branch v4.10.0 https://github.com/litespeedtech/lsquic.git
 git clone --recursive https://github.com/cccyun/kangle.git
 
 cd kangle
-mkdir cmake-build && cd cmake-build
-cmake .. \
+git -C ../lsquic apply "$PWD/khttpd/patches/lsquic-4.10.0-content-length.patch"
+git -C ../lsquic apply "$PWD/khttpd/patches/lsquic-4.10.0-reset-stream.patch"
+cmake -S . -B cmake-build \
   -DCMAKE_INSTALL_PREFIX=/vhs/kangle \
   -DCMAKE_BUILD_TYPE=Release \
-  -DBORINGSSL_DIR=../../boringssl \
-  -DLSQUIC_DIR=../../lsquic
-make -j"$(nproc)"
+  -DKASYNC_DIR="$PWD/kasync" \
+  -DBORINGSSL_DIR="$PWD/../boringssl" \
+  -DLSQUIC_DIR="$PWD/../lsquic"
+cmake --build cmake-build -j"$(nproc)"
 ```
 
 不能只设置 `LSQUIC_DIR`；当前构建逻辑只有在同时设置 `BORINGSSL_DIR` 时才会启用 LSQUIC。
+
+CentOS/RHEL 7 编译此版本需要更新的编译器。如果继续使用由 GCC 4.8 编译的第三方 C++
+模块，请添加 `-DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=0"`，并在安装程序所在目录
+提供兼容的 C++ 运行库，使用 `$ORIGIN` RPATH 加载。
+
+在 HTTPS 监听配置中启用 `http3="1"`，并开放对应端口的 TCP 和 UDP。HTTP/3 使用 TLS 1.3。
+可执行 `python3 test/http3_integration.py /absolute/path/to/kangle` 运行隔离的协议测试；
+该测试需要 Go 1.23 和 Python `h2>=3.2`。
 
 ## 完整测试
 

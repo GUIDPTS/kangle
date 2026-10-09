@@ -152,29 +152,48 @@ make -j"$(nproc)"
 
 ## HTTP/3 build
 
-HTTP/3 requires both BoringSSL and LSQUIC source trees. Keep them outside the
-kangle repository and pass their absolute or relative paths to CMake. LSQUIC
-also has its own platform build dependencies; install those before configuring
-kangle.
+HTTP/3 requires both BoringSSL and LSQUIC source trees, CMake 3.16 or newer,
+and a compiler supporting C11/C++17. Keep the dependencies outside the kangle
+repository. The tested versions are LSQUIC **v4.10.0** and BoringSSL
+**0.20250807.0** (commit `e20e8486554098772673b55ea76bb003d0b330e5`).
+Apply both bundled LSQUIC patches before configuring; CMake checks for the
+required header API and patch markers.
+The BoringSSL checkout below is optional and reproduces the tested build;
+Kangle does not require that specific commit. To use a newer revision, omit
+the checkout or select another commit, then rebuild and rerun TLS/HTTP/3 tests.
 
 ```bash
 mkdir kangle-http3 && cd kangle-http3
 git clone --recursive https://github.com/google/boringssl.git
-git clone --recursive https://github.com/litespeedtech/lsquic.git
+# Optional: reproduce the tested BoringSSL revision.
+git -C boringssl checkout e20e8486554098772673b55ea76bb003d0b330e5
+git clone --recursive --branch v4.10.0 https://github.com/litespeedtech/lsquic.git
 git clone --recursive https://github.com/cccyun/kangle.git
 
 cd kangle
-mkdir cmake-build && cd cmake-build
-cmake .. \
+git -C ../lsquic apply "$PWD/khttpd/patches/lsquic-4.10.0-content-length.patch"
+git -C ../lsquic apply "$PWD/khttpd/patches/lsquic-4.10.0-reset-stream.patch"
+cmake -S . -B cmake-build \
   -DCMAKE_INSTALL_PREFIX=/vhs/kangle \
   -DCMAKE_BUILD_TYPE=Release \
-  -DBORINGSSL_DIR=../../boringssl \
-  -DLSQUIC_DIR=../../lsquic
-make -j"$(nproc)"
+  -DKASYNC_DIR="$PWD/kasync" \
+  -DBORINGSSL_DIR="$PWD/../boringssl" \
+  -DLSQUIC_DIR="$PWD/../lsquic"
+cmake --build cmake-build -j"$(nproc)"
 ```
 
 Passing `LSQUIC_DIR` alone is not sufficient; the current build enables
 LSQUIC only when `BORINGSSL_DIR` is also set.
+
+CentOS/RHEL 7 needs a newer compiler for this build. When reusing third-party
+C++ modules built with GCC 4.8, add
+`-DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=0"` and provide a compatible C++
+runtime alongside the installed binaries with an `$ORIGIN` RPATH.
+
+Enable `http3="1"` on an HTTPS listener and allow both TCP and UDP on its port.
+HTTP/3 uses TLS 1.3. The isolated protocol checks can be run with
+`python3 test/http3_integration.py /absolute/path/to/kangle`; they require
+Go 1.23 and Python `h2>=3.2`.
 
 ## Test suite
 

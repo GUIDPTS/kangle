@@ -463,6 +463,7 @@ DSO 开发接口见 [dso.md](./dso.md)。
 | `doc_root` | 文档根目录，可为绝对路径或相对安装目录的路径。 |
 | `browse` | 目录无首页时是否列目录，`0`/`1` 或 `off`/`on`。 |
 | `inherit` | 是否继承 `vhs`，`0`/`1` 或 `off`/`on`。 |
+| early_hints | 上游 103 Early Hints 转发，`0`/`1` 或 `off`/`on`/`h2` |
 | `access` | 独立访问控制文件路径。 |
 | `htaccess` | htaccess 文件名/路径。 |
 | `envs` | 虚拟主机环境变量列表，使用项目的环境变量格式。 |

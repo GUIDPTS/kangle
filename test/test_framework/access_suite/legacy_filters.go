@@ -10,6 +10,7 @@ import (
 	"test_framework/common"
 	"test_framework/config"
 
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 )
 
@@ -91,12 +92,14 @@ func check_legacy_filters() {
 	common.AssertSame(atomic.LoadInt32(&guestCacheHits), int32(1))
 
 	common.Getx("/filters/content-deny", host, nil, func(resp *http.Response, err error) {
-		// A matched response-body deny may close HTTP/1 or reset HTTP/2 before
+		// A matched response-body deny may close HTTP/1 or reset HTTP/2/3 before
 		// sending headers. This is intentional; never dereference a nil response.
 		if err != nil {
 			var streamErr http2.StreamError
+			var h3Err *http3.Error
 			common.Assert("content deny closes or resets the response", errors.Is(err, io.EOF) ||
-				(errors.As(err, &streamErr) && (streamErr.Code == http2.ErrCodeInternal || streamErr.Code == http2.ErrCodeCancel)))
+				(errors.As(err, &streamErr) && (streamErr.Code == http2.ErrCodeInternal || streamErr.Code == http2.ErrCodeCancel)) ||
+				(errors.As(err, &h3Err) && h3Err.Remote && h3Err.ErrorCode == http3.ErrCodeRequestCanceled))
 			return
 		}
 		common.Assert("content deny response exists", resp != nil)

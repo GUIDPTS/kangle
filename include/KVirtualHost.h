@@ -114,6 +114,8 @@ public:
 			uint16_t app_share : 1;
 			/* 应用程序池数量 */
 			uint8_t app;
+			// 0: off, 1: HTTP/1.1 and HTTP/2, 2: HTTP/2 only.
+			uint16_t early_hints : 2;
 		};
 		uint32_t flags;
 	};

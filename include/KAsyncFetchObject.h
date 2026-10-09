@@ -7,6 +7,7 @@
 #include "KHttpResponseParser.h"
 #include "KHttpParser.h"
 #include "kfiber.h"
+#include "KHttpHeaderManager.h"
 
 enum Parse_Result
 {
@@ -65,6 +66,7 @@ public:
 	}
 	virtual ~KAsyncFetchObject()
 	{
+		free_header_list(early_headers.steal_header());
 		assert(client==NULL);	
 		if (client) {
 			client->gc(-1);
@@ -184,5 +186,11 @@ private:
 		ks_buffer_init(&us_buffer, 8192);
 	}
 	KGL_RESULT InternalProcess(KHttpRequest *rq, kfiber** post_fiber);
+	KGL_RESULT StoreEarlyHint(const char* name, int name_len, const char* value, int value_len);
+	KGL_RESULT ForwardEarlyHints(KHttpRequest* rq);
+	KHttpHeaderManager early_headers{};
+	size_t early_bytes = 0;
+	bool forward_early_hints = false;
+	bool early_overflow = false;
 };
 #endif

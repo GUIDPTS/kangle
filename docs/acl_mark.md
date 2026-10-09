@@ -187,6 +187,7 @@ Header 正则可以写在 `val` 属性或元素文本中：
 | `multi_server` | 请求 | `nodes` | 动态选择多节点服务。 |
 | `port_map` | 请求 | `host`、`port`、`param` | 四层端口映射；TCP 工作模式构建可用。 |
 | `extend_flag` | 请求/响应 | `no_extend` | 设置或清除“禁止扩展处理”标志。 |
+| early_hints | 请求 | value | 上游 103 Early Hints 转发，value可设置`off`/`on`/`h2` |
 
 `rewritex` 示例：
 

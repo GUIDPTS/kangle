@@ -645,6 +645,7 @@ void KVirtualHost::dump_info(kgl::serializable* s) {
 	s->add("access", user_access);
 	s->add("browse", browse);
 	s->add("inherit", inherit);
+	s->add("early_hints", early_hints == 2 ? "h2" : (early_hints ? "on" : "off"));
 #ifdef ENABLE_VH_RUN_AS
 	s->add("user", user);
 	s->add("group", group);
@@ -662,6 +663,8 @@ bool KVirtualHost::parse_xml(const khttpd::KXmlNodeBody* body, KVirtualHost* ov)
 	parseEnv(attr("envs"));
 	setDocRoot(attr["doc_root"]);
 	browse = (attr["browse"] == "on" || attr["browse"] == "1");
+	early_hints = attr["early_hints"] == "h2" ? 2 :
+		(attr["early_hints"] == "on" || attr["early_hints"] == "1" ? 1 : 0);
 
 	inherit = (attr["inherit"] == "on" || attr["inherit"] == "1");
 	setAccess(attr["access"]);
