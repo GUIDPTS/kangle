@@ -2,6 +2,7 @@
 #include "khttpext.h"
 #include <string>
 #include <cstring>
+#include <algorithm>
 
 DLL_PUBLIC BOOL WINAPI GetExtensionVersion(HSE_VERSION_INFO* info) {
     strcpy(info->lpszExtensionDesc, "API regression fixture");
@@ -20,8 +21,10 @@ static bool map(EXTENSION_CONTROL_BLOCK* ecb, const char* path) {
     char data[4096];
     strcpy(data, path);
     DWORD len = sizeof(data);
-    return ecb->ServerSupportFunction(ecb->ConnID, HSE_REQ_MAP_URL_TO_PATH, data, &len, NULL)
-        && std::string(data).find(path) != std::string::npos;
+    if (!ecb->ServerSupportFunction(ecb->ConnID, HSE_REQ_MAP_URL_TO_PATH, data, &len, NULL)) return false;
+    std::string mapped(data);
+    std::replace(mapped.begin(), mapped.end(), '\\', '/');
+    return mapped.find(path) != std::string::npos;
 }
 
 DLL_PUBLIC DWORD WINAPI HttpExtensionProc(EXTENSION_CONTROL_BLOCK* ecb) {

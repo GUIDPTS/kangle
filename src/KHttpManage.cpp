@@ -32,7 +32,6 @@
 #include "KHttpServerParser.h"
 #include "KVirtualHostManage.h"
 #include "KBodyWStream.h"
-#include "iconv.h"
 #include "KProcessManage.h"
 #include "KLogHandle.h"
 #include "KUrlParser.h"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Targeted ACL/filter/API/WHM/WebDAV tests, on Linux, with isolated config."""
+"""Targeted ACL/filter/API/WHM/WebDAV tests with isolated config."""
 import concurrent.futures
 import hashlib
 import http.client
@@ -17,6 +17,7 @@ import time
 import urllib.parse
 from xml.sax.saxutils import escape
 from upstream_functional_regression import exact, free_port, start_server, HttpOrigin, fcgi_record
+from runtime_fixture import exe_name, module_name, stop_server
 
 
 class MapOrigin(socketserver.BaseRequestHandler):
@@ -37,7 +38,7 @@ class MapOrigin(socketserver.BaseRequestHandler):
             time.sleep(0.05)
             self.request.sendall(record[11:])
             kind, result = packet()
-            if kind != 154 or not result.endswith(path.encode()):
+            if kind != 154 or not result.replace(b'\\', b'/').endswith(path.encode()):
                 raise AssertionError((kind, result, path))
         mapped('/map/before-complete-packet')
         self.request.sendall(fcgi_record(6, b'Status: 200 OK\r\nContent-Length: 9\r\n\r\nfirst'))
@@ -47,7 +48,7 @@ class MapOrigin(socketserver.BaseRequestHandler):
 
 def main():
     build = os.path.dirname(os.path.abspath(sys.argv[1]))
-    root = tempfile.mkdtemp(prefix='kangle-access-regression-')
+    root = tempfile.mkdtemp(prefix='kangle-access-regression-').replace('\\', '/')
     os.chmod(root, 0o755)
     proc = None
     checks = 0
@@ -61,7 +62,7 @@ def main():
     try:
         for name in ['bin', 'etc', 'ext', 'var', 'tmp', 'www', 'www/api', 'www/dav']:
             os.makedirs(root + '/' + name, exist_ok=True)
-        for name in ['kangle', 'extworker', 'webdav.so', 'api_functional_fixture.so']:
+        for name in [exe_name('kangle'), exe_name('extworker'), module_name('webdav'), module_name('api_functional_fixture')]:
             shutil.copy2(build + '/' + name, root + '/bin/' + name)
         with open(root + '/www/ready', 'w') as f:
             f.write('ready')
@@ -102,10 +103,13 @@ def main():
 </vh>
 <vh name='mt' doc_root='www' inherit='on'><host>mt.test</host><map path='/api' extend='api:fixture-mt' confirm_file='0' allow_method='*'/></vh>
 </config>""".format(port=port, http=origin.server_address[1], mapping=mapping.server_address[1])
+        cfg = cfg.replace('bin/api_functional_fixture.so', 'bin/' + module_name('api_functional_fixture'))
+        cfg = cfg.replace('bin/webdav.so', 'bin/' + module_name('webdav'))
         with open(root + '/etc/config.xml', 'w') as f:
             f.write(cfg)
         log = open(root + '/console.log', 'wb')
-        proc = subprocess.Popen([root + '/bin/kangle', '-n', '-g'], stdout=log, stderr=log)
+        executable = root + '/bin/' + exe_name('kangle')
+        proc = subprocess.Popen([executable, '-n', '-g'], stdout=log, stderr=log)
         def request(path, method='GET', body=None, headers=None, host='localhost'):
             cn = http.client.HTTPConnection('127.0.0.1', port, timeout=15)
             cn.request(method, path, body=body, headers=dict({'Host': host}, **(headers or {})))
@@ -181,7 +185,7 @@ def main():
         result = whm('whm_call=sync', form)
         output = result['result']['out']
         if isinstance(output, list): output = output[0]
-        check(result['status'] == '200' and output.endswith('DONE:262144:'+digest+'\n'), 'WHM large duplex stdin/stdout does not deadlock')
+        check(result['status'] == '200' and output.rstrip('\r\n').endswith('DONE:262144:'+digest), 'WHM large duplex stdin/stdout does not deadlock')
         for _ in range(12):
             result = whm('whm_call=async', form)
             session = result['result']['session']
@@ -201,12 +205,8 @@ def main():
         check(proc.poll() is None and request('/ready')[0] == 200, 'service survives targeted tests')
         print('SUCCESS: %d checks; artifacts: %s' % (checks, root), flush=True)
     finally:
-        if proc and proc.poll() is None:
-            proc.terminate()
-            try: proc.wait(10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+        if proc:
+            stop_server(proc, executable)
         for server in servers:
             server.shutdown()
             server.server_close()

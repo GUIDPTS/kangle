@@ -16,7 +16,7 @@ import sys
 import tempfile
 import threading
 import time
-from runtime_fixture import copy_runtime
+from runtime_fixture import copy_server, stop_server
 import h2.config
 import h2.connection
 import h2.events
@@ -222,8 +222,7 @@ def run(binary):
     try:
         for name in ['etc', 'ext', 'bin', 'var', 'tmp', 'log', 'www']:
             os.makedirs(root+'/'+name)
-        shutil.copy2(binary, root+'/bin/kangle')
-        copy_runtime(binary, root+'/bin')
+        executable = copy_server(binary, root+'/bin')
         for handler in [HttpOrigin, H2Origin]:
             s = Server(('127.0.0.1', 0), handler)
             s.lock, s.resets = threading.Lock(), 0
@@ -231,11 +230,11 @@ def run(binary):
             threading.Thread(target=s.serve_forever, daemon=True).start()
         http_origin, h2_origin = servers
         frontend, tlsport, legacyport = port(), port(), port()
-        subprocess.check_call(['openssl', 'req', '-x509', '-nodes', '-newkey', 'rsa:2048', '-keyout', root+'/etc/key.pem', '-out', root+'/etc/cert.pem', '-days', '2', '-subj', '/CN=localhost'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call([os.environ.get('KANGLE_TEST_OPENSSL', 'openssl'), 'req', '-x509', '-nodes', '-newkey', 'rsa:2048', '-keyout', root+'/etc/key.pem', '-out', root+'/etc/cert.pem', '-days', '2', '-subj', '/CN=localhost'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cfg = '''<config><worker_thread>2</worker_thread><timeout rw='8' connect='2'/>
 <listen ip='127.0.0.1' port='{front}h' type='http'/>
 <listen ip='127.0.0.1' port='{tls}' type='https' certificate='etc/cert.pem' certificate_key='etc/key.pem' http2='1'/>
-<listen ip='127.0.0.1' port='{legacy}' type='https' certificate='etc/cert.pem' certificate_key='etc/key.pem' protocols='TLSv1 TLSv1.1 TLSv1.2 TLSv1.3'/>
+<listen ip='127.0.0.1' port='{legacy}' type='https' certificate='etc/cert.pem' certificate_key='etc/key.pem' protocols='TLSv1 TLSv1.1 TLSv1.2 TLSv1.3' cipher='DEFAULT:@SECLEVEL=0'/>
 <cache default='0' memory='16M' disk='0'/><request action='allow'/><response action='allow'/>
 <server name='http' host='127.0.0.1' port='{http}' proto='http' life_time='30'/>
 <server name='h2' host='127.0.0.1' port='{h2}h' proto='http' life_time='30'/>
@@ -248,7 +247,7 @@ def run(binary):
         with open(root+'/etc/config.xml', 'w') as f:
             f.write(cfg)
         log = open(root+'/console.log', 'wb')
-        proc = subprocess.Popen([root+'/bin/kangle', '-n', '-g'], stdout=log, stderr=log)
+        proc = subprocess.Popen([executable, '-n', '-g'], stdout=log, stderr=log)
         for _ in range(100):
             try:
                 socket.create_connection(('127.0.0.1', frontend), timeout=.1).close()
@@ -405,7 +404,9 @@ def run(binary):
             executable=os.environ.get('KANGLE_TEST_OPENSSL','openssl')
             if version == 'tls1_3':
                 executable=os.environ.get('KANGLE_TEST_OPENSSL13', executable)
-            result=subprocess.run([executable,'s_client','-ign_eof','-connect','127.0.0.1:'+str(target),'-servername','http.test','-'+version], input=b'GET / HTTP/1.1\r\nHost: http.test\r\nConnection: close\r\n\r\n',stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=8)
+            # Permit legacy ciphers in the client so a refusal is actually
+            # testing the listener's policy, not OpenSSL's local defaults.
+            result=subprocess.run([executable,'s_client','-ign_eof','-cipher','DEFAULT:@SECLEVEL=0','-connect','127.0.0.1:'+str(target),'-servername','http.test','-'+version], input=b'GET / HTTP/1.1\r\nHost: http.test\r\nConnection: close\r\n\r\n',stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=8)
             with open(root+'/tls-'+str(target)+'-'+version+'.log','wb') as f:
                 f.write(result.stdout)
             return b'HTTP/1.1 200' in result.stdout
@@ -420,13 +421,8 @@ def run(binary):
         print('FAILED; artifacts preserved: '+root, file=sys.stderr,flush=True)
         raise
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+        if proc is not None:
+            stop_server(proc, executable)
         for server in servers:
             server.shutdown()
             server.server_close()

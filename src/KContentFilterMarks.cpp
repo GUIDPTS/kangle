@@ -95,7 +95,7 @@ KGL_RESULT filter_write(kgl_response_body_ctx* raw, const char* data, int length
 KGL_RESULT filter_writev(kgl_response_body_ctx* raw, const kbuf* bufs, int length) {
 	auto* ctx = reinterpret_cast<BodyFilter*>(raw);
 	while (length > 0 && bufs) {
-		int got = std::min(length, bufs->used);
+		int got = (std::min)(length, bufs->used);
 		KGL_RESULT result = ctx->write((const char*)bufs->data, got);
 		if (result != KGL_OK) {
 			return result;

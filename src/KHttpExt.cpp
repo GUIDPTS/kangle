@@ -16,8 +16,10 @@
 #ifndef _WIN32
 //使用gcc中的libiconv
 #define LIBICONV_PLUG 1
-#endif
 #include "iconv.h"
+#else
+#include "KWinIconv.h"
+#endif
 
 using namespace std;
 static struct {
@@ -350,7 +352,7 @@ char *utf82charset(const char *str, size_t len, const char *charset) {
 	char *buf_str = buf;
 	size_t ret_len;
 	memset(buf, 0, buf_len);
-#if defined( _LIBICONV_VERSION) && defined(_WIN32)
+#ifdef _WIN32
 	ret_len = iconv(cp, (const char **)&str, &len, &buf_str, &buf_len);
 #else
 	ret_len = iconv(cp, (char **)&str, &len, &buf_str, &buf_len);

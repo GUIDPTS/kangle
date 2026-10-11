@@ -204,7 +204,19 @@ func Close() {
 	}
 	kangle_cmd = nil
 	go Stop()
-	_ = cmd.Wait()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			panic(fmt.Errorf("kangle exited abnormally: %w", err))
+		}
+		fmt.Println("kangle exited successfully")
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		panic("kangle did not shut down within 30 seconds")
+	}
 }
 func Stop() {
 	exec.Command(kangleCommand, "-q").Run()

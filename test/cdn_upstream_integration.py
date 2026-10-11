@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from runtime_fixture import copy_runtime
+from runtime_fixture import copy_server, stop_server
 
 
 class Origin(http.server.BaseHTTPRequestHandler):
@@ -42,8 +42,7 @@ def run(binary):
             root = tempfile.mkdtemp(prefix='kangle-cdn-upstream-')
             for name in ('etc', 'ext', 'bin', 'var', 'tmp', 'log', 'www'):
                 os.makedirs(root+'/'+name)
-            shutil.copy2(binary, root+'/bin/kangle')
-            copy_runtime(binary, root+'/bin')
+            executable = copy_server(binary, root+'/bin')
             chain = "<table name='BEGIN'><chain action='continue'>"+rule+'</chain></table>'
             bound_host = domain+'.aliyuncs.com' if where == 'global' else domain
             cfg = "<config><worker_thread>2</worker_thread><timeout rw='3' connect='2'/>"
@@ -58,7 +57,7 @@ def run(binary):
             with open(root+'/etc/config.xml', 'w') as f:
                 f.write(cfg)
             with open(root+'/console.log', 'wb') as log:
-                proc = subprocess.Popen([root+'/bin/kangle', '-n', '-g'], stdout=log, stderr=log)
+                proc = subprocess.Popen([executable, '-n', '-g'], stdout=log, stderr=log)
             try:
                 for _ in range(100):
                     try:
@@ -92,13 +91,7 @@ def run(binary):
                 print('PASS: %s Host rewrite, %s upstream port, strict client validation' %
                     (where, 'inherited' if inherited else 'explicit'), flush=True)
             finally:
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
+                stop_server(proc, executable)
         print('CDN upstream regression passed', flush=True)
     finally:
         origin.shutdown()

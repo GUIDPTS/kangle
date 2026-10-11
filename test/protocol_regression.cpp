@@ -19,6 +19,61 @@
 #include "KHttpHeaderManager.h"
 #include "KHttpValidation.h"
 #include "KUrl.h"
+#include <errno.h>
+#include "kselectable.h"
+
+#ifdef ENABLE_KSSL_BIO
+static int tls_retries;
+static int tls_completions;
+static kev_result count_tls_retry(kselector*, kselectable*, result_callback, kgl_iovec*, void* arg) {
+    ++tls_retries;
+    xfree(arg); // selectable_ssl_read allocated this BIO read buffer.
+    return kev_ok;
+}
+static kev_result complete_tls_error(KOPAQUE, void*, int got) {
+    assert(got < 0);
+    ++tls_completions;
+    return kev_ok;
+}
+static void check_tls_stale_errno() {
+    kgl_bio_init_method();
+    SSL_CTX* ctx = SSL_CTX_new(TLS_method());
+    assert(ctx);
+    kssl_session session = {};
+    session.ssl = SSL_new(ctx);
+    assert(session.ssl);
+    BIO* input = BIO_new(BIO_kgl_method());
+    BIO* output = BIO_new(BIO_kgl_method());
+    assert(input && output);
+    SSL_set_bio(session.ssl, input, output);
+    SSL_set_accept_state(session.ssl);
+    session.handshake = 1;
+    session.bio[OP_READ].bio = input;
+    session.bio[OP_WRITE].bio = output;
+    // A malformed TLS record must terminate even if a previous BIO left EAGAIN.
+    const char invalid[] = "HTTP/1.1 200 OK\r\n\r\n";
+    assert(BIO_write(input, invalid, sizeof(invalid) - 1) == sizeof(invalid) - 1);
+    kselectable st = {};
+    st.ssl = &session;
+    char data[16];
+    kgl_iovec bufs[2] = {};
+    bufs[0].iov_base = (char*)&bufs[1];
+    bufs[0].iov_len = 1;
+    bufs[1].iov_base = data;
+    bufs[1].iov_len = sizeof(data);
+    selector_read saved_read = kgl_selector_module.read;
+    kgl_selector_module.read = count_tls_retry;
+    ERR_clear_error();
+    errno = EAGAIN;
+    selectable_event_read(&st, complete_tls_error, bufs, NULL);
+    kgl_selector_module.read = saved_read;
+    assert(tls_retries == 0 && tls_completions == 1);
+    SSL_free(session.ssl);
+    SSL_CTX_free(ctx);
+    ERR_clear_error();
+    puts("TLS terminal error with stale EAGAIN passed");
+}
+#endif
 
 static void check_header_tail() {
     KHttpHeaderManager headers = {};
@@ -282,6 +337,9 @@ static void check_xml() {
 }
 
 int main() {
+#ifdef ENABLE_KSSL_BIO
+    check_tls_stale_errno();
+#endif
     check_header_tail();
     check_node_recovery();
     check_fields_and_dates();

@@ -30,6 +30,7 @@
  //#include "KHttpTransfer.h"
 #include "KHttpBasicAuth.h"
 #include "KApiRedirect.h"
+#include "KTempFile.h"
 #include "kmalloc.h"
 #define PTR_LEN(end,start) ((u_char *)end - (u_char *)start)
 KFastcgiFetchObject::KFastcgiFetchObject() : KAsyncFetchObject(KGL_UPSTREAM_NEED_TMP_FILE|KGL_UPSTREAM_NEED_QUEUE)
@@ -44,6 +45,16 @@ KFastcgiFetchObject::~KFastcgiFetchObject() {
 }
 KGL_RESULT KFastcgiFetchObject::buildHead(KHttpRequest* rq)
 {
+#ifdef ENABLE_TF_EXCHANGE
+	// Ordinary CGI applications (including PHP) require CONTENT_LENGTH.
+	// Buffer decoded chunked/H2 bodies before building the FastCGI parameters.
+	// API children have their own unknown-length protocol and must stay streaming.
+	if (!is_extend() && in->f->body.get_left(in->body_ctx) < 0) {
+		if (!new_tempfile_input_stream(in)) {
+			return KGL_EUNKNOW;
+		}
+	}
+#endif
 	parser.first_same = 1;
 	pop_header.proto = Proto_fcgi;
 	buffer = new KSocketBuffer(NBUFF_SIZE);

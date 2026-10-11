@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import time
-from runtime_fixture import copy_runtime
+from runtime_fixture import copy_server, stop_server
 
 
 class Origin(http.server.BaseHTTPRequestHandler):
@@ -42,8 +42,7 @@ def run(binary):
             try:
                 for name in ('etc', 'ext', 'bin', 'var', 'tmp', 'log', 'www'):
                     os.makedirs(root+'/'+name)
-                shutil.copy2(binary, root+'/bin/kangle')
-                copy_runtime(binary, root+'/bin')
+                executable = copy_server(binary, root+'/bin')
                 with open(root+'/www/probe.txt', 'w') as f:
                     f.write('local')
                 cfg = "<config><worker_thread>2</worker_thread><timeout rw='3' connect='2'/>"
@@ -59,7 +58,7 @@ def run(binary):
                 with open(root+'/etc/config.xml', 'w') as f:
                     f.write(cfg)
                 with open(root+'/console.log', 'wb') as log:
-                    proc = subprocess.Popen([root+'/bin/kangle', '-n', '-g'], stdout=log, stderr=log)
+                    proc = subprocess.Popen([executable, '-n', '-g'], stdout=log, stderr=log)
                 for _ in range(100):
                     try:
                         socket.create_connection(('127.0.0.1', port), timeout=.1).close()
@@ -86,13 +85,8 @@ def run(binary):
                 assert origin.requests == requests, 'nonmatching host reached origin'
                 print('PASS: host proxy, rewrite=%s, inherited port, ACL fallback' % rewrite, flush=True)
             finally:
-                if proc is not None and proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
+                if proc is not None:
+                    stop_server(proc, executable)
     finally:
         origin.shutdown()
         origin.server_close()
