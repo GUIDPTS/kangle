@@ -204,7 +204,7 @@ void KSubVirtualHost::set_doc_root(const char* doc_root, const char* dir) {
 	if (strncasecmp(this->dir, "http://", 7) == 0) {
 		http = new SubdirHttp;
 		type = subdir_type::subdir_http;
-		if (!parse_url(this->dir, http->dst)) {
+		if (!parse_upstream_url(this->dir, http->dst)) {
 			free_subtype_data();
 			klog(KLOG_ERR, "cann't parse url [%s]\n", this->dir);
 			return;

@@ -188,6 +188,17 @@ static void check_protocol_validation() {
         KUrl url(false);
         assert(parse_url_host(&url,host,strlen(host)));
     }
+    for (const char* text : {"http://127.0.0.1:0/", "http://-:0/", "http://[::1]:0/", "https://example.test:0/path?q=1"}) {
+        KUrl strict(false), upstream(false);
+        assert(!parse_url(text, &strict));
+        assert(parse_upstream_url(text, &upstream));
+        assert(upstream.port == 0 && KBIT_TEST(upstream.flags, KGL_URL_HAS_PORT));
+        assert(upstream.host && upstream.path);
+    }
+    for (const char* text : {"http://x:65536/", "http://x:0garbage/", "http://x:/", "http://x@y:0/"}) {
+        KUrl upstream(false);
+        assert(!parse_upstream_url(text, &upstream));
+    }
 }
 
 static void check_header_names() {
