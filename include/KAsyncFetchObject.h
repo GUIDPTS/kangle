@@ -127,7 +127,7 @@ public:
 	{
 		return client;
 	}
-	KGL_RESULT upstream_is_error(KHttpRequest *rq,int error,const char *msg);
+	KGL_RESULT upstream_is_error(KHttpRequest *rq,int error,const char *msg, bool transport_error = true);
 	KGL_RESULT PushHeader(KHttpRequest *rq,const char *attr, int attr_len, const char *val, int val_len, bool request_line);
 	ks_buffer us_buffer;
 	KSocketBuffer *buffer;

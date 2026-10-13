@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -188,6 +189,65 @@ func main() {
 	healthy(cn, "ordinary GET")
 	r := receive(open(cn, base("h1.on.test", "/ok", "HEAD"), nil, nil, true))
 	check(r.err == nil && r.status == 200 && len(r.body) == 0 && value(r.fields, "content-length") == "2", "HEAD keeps length without sending body")
+	for _, form := range []struct {
+		body, tail, want string
+	}{
+		{"log=&pwd=&testcookie=1", "", "22||log=&pwd=&testcookie=1|"},
+		{"", "", "0|||"},
+		{"abc", "form-tail", "|chunked|abc|form-tail"},
+		{strings.Repeat("x", 65536), "", "65536||" + strings.Repeat("x", 65536) + "|"},
+		{strings.Repeat("x", 65537), "", "65537||" + strings.Repeat("x", 65537) + "|"},
+		{strings.Repeat("x", 1048576), "", "1048576||" + strings.Repeat("x", 1048576) + "|"},
+		{strings.Repeat("x", 65537), "form-tail", "|chunked|" + strings.Repeat("x", 65537) + "|form-tail"},
+	} {
+		h := append(base("h1.on.test", "/form-framing", "POST"),
+			field{Name: "content-type", Value: "application/x-www-form-urlencoded"},
+			field{Name: "content-length", Value: fmt.Sprint(len(form.body))})
+		var tail []field
+		if form.tail != "" {
+			h = append(h, field{Name: "trailer", Value: "x-upload"})
+			tail = []field{{Name: "x-upload", Value: form.tail}}
+		}
+		r := receive(open(cn, h, []byte(form.body), tail, true))
+		check(r.err == nil && r.status == 200 && string(r.body) == form.want,
+			fmt.Sprintf("H3 form framing preserves length or declared trailers: size=%d trailer=%v", len(form.body), tail != nil))
+	}
+	for _, upload := range []struct {
+		size     int
+		typeName string
+	}{
+		{22, "application/x-www-form-urlencoded"},
+		{1048576, "application/x-www-form-urlencoded"},
+		{1048576, "application/json"},
+		{1048576, "application/octet-stream"},
+	} {
+		before := request(cn, "h1.on.test", "/form-stream-prefix")
+		var started int
+		fmt.Sscanf(string(before.body), "%d", &started)
+		h := append(base("h1.on.test", "/form-streaming", "POST"),
+			field{Name: "content-type", Value: upload.typeName},
+			field{Name: "content-length", Value: fmt.Sprint(upload.size)})
+		s := open(cn, h, []byte("x"), nil, false)
+		want := fmt.Sprintf("%d|%d|", started+1, upload.size)
+		var prefix reply
+		for i := 0; i < 100; i++ {
+			prefix = request(cn, "h1.on.test", "/form-stream-prefix")
+			if prefix.err == nil && string(prefix.body) == want {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		check(prefix.err == nil && string(prefix.body) == want,
+			fmt.Sprintf("H3 Content-Length first byte reaches origin before upload completes: size=%d type=%s", upload.size, upload.typeName))
+		frame(s, 0, []byte(strings.Repeat("x", upload.size-1)))
+		s.Close()
+		r := receive(s)
+		check(r.err == nil && r.status == 200, "H3 streamed upload completes")
+	}
+	hUndeclared := append(base("h1.on.test", "/form-framing", "POST"), field{Name: "content-length", Value: "3"})
+	r = receive(open(cn, hUndeclared, []byte("abc"), []field{{Name: "x-upload", Value: "undeclared"}}, true))
+	check(r.err == nil && r.status == 400, "H3 undeclared trailer on Content-Length HTTP/1 upstream gets clear 400")
+	healthy(cn, "other H3 stream survives undeclared trailer rejection")
 	for _, host := range []string{"h1.on.test", "h2.on.test"} {
 		for _, path := range []string{"/trailers", "/empty"} {
 			r := request(cn, host, path)
@@ -201,6 +261,9 @@ func main() {
 			h := base(host, "/upload", "POST")
 			if fixed {
 				h = append(h, field{Name: "content-length", Value: "3"})
+				if host == "h1.on.test" {
+					h = append(h, field{Name: "trailer", Value: "x-upload"})
+				}
 			}
 			r := receive(open(cn, h, []byte("abc"), []field{{Name: "x-upload", Value: "client-tail"}}, true))
 			key := "x-meta"
@@ -210,6 +273,9 @@ func main() {
 			check(r.err == nil && r.status == 200 && string(r.body) == "abc" && value(r.tail, key) == "client-tail", fmt.Sprintf("%s: request/response trailers, fixed=%v", host, fixed))
 		}
 		h := append(base(host, "/upload", "POST"), field{Name: "content-length", Value: "0"})
+		if host == "h1.on.test" {
+			h = append(h, field{Name: "trailer", Value: "x-upload"})
+		}
 		r := receive(open(cn, h, nil, []field{{Name: "x-upload", Value: "zero-tail"}}, true))
 		key := "x-meta"
 		if host == "h2.on.test" {

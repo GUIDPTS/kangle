@@ -492,6 +492,15 @@ TLS 虚拟主机还可使用 `certificate`、`certificate_key`、`cipher`、`pro
 - `<index>`、`<error>`、`<mime_type>`、`<alias>`、`<map>`：语义同 `vhs`。
 - `<request>`、`<response>`：该虚拟主机自己的访问控制规则。
 
+## HTTP 回源请求体与 Trailer
+
+已知请求体长度且没有 `Trailer` 请求头时，HTTP/1 回源使用 `Content-Length` 边接收边转发，
+不按 64KiB 分界，也不会为了探测尾部字段而缓冲整个请求。长度未知或声明了 `Trailer` 时使用 chunked。
+
+HTTP/2、HTTP/3 客户端向 HTTP/1 源站发送带 `Content-Length` 的请求并携带尾部字段时，
+需在初始请求头声明，例如 `Trailer: X-Upload`。未声明就发送尾部字段会返回 400，
+因为已经发送的 `Content-Length` 回源无法再附加 Trailer。HTTP/2 上游不需要这项声明。
+
 ## 配置排错
 
 - 首先检查 XML 是否闭合、属性值是否正确转义（尤其是 `&` 应写为 `&amp;`）。

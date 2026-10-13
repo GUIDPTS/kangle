@@ -48,9 +48,24 @@ class HttpOrigin(socketserver.StreamRequestHandler):
             if headers.get(b'transfer-encoding') == b'chunked':
                 body, trailers = chunks(self.rfile)
             else:
-                body = exact(self.rfile, int(headers.get(b'content-length', b'0')))
+                length = int(headers.get(b'content-length', b'0'))
+                if path == b'/form-streaming' and length:
+                    body = exact(self.rfile, 1)
+                    with self.server.lock:
+                        self.server.form_started += 1
+                        self.server.form_prefix = b'|'.join([str(self.server.form_started).encode(),
+                            headers.get(b'content-length', b''), headers.get(b'transfer-encoding', b'')])
+                    body += exact(self.rfile, length-1)
+                else:
+                    body = exact(self.rfile, length)
                 trailers = {}
-            if path == b'/cancel-count':
+            if path == b'/form-framing':
+                body = b'|'.join([headers.get(b'content-length', b''), headers.get(b'transfer-encoding', b''),
+                                  body, trailers.get(b'x-upload', b'')])
+            elif path == b'/form-stream-prefix':
+                with self.server.lock:
+                    body = self.server.form_prefix
+            elif path == b'/cancel-count':
                 with self.server.lock:
                     body = str(self.server.canceled).encode()
             elif path == b'/hold-count':
@@ -88,6 +103,7 @@ def run(binary):
         for handler in (HttpOrigin, H2Origin, HintHttpOrigin, HintH2Origin):
             server = Server(('127.0.0.1', 0), handler)
             server.lock, server.canceled, server.resets, server.held = threading.Lock(), 0, 0, 0
+            server.form_started, server.form_prefix = 0, b'0||'
             servers.append(server)
             threading.Thread(target=server.serve_forever, daemon=True).start()
         servers[0].h2_origin = servers[1]

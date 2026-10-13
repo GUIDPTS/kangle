@@ -18,6 +18,7 @@
 #include "KHttpFieldValue.h"
 #include "KHttpValidation.h"
 #include "KVirtualHost.h"
+#include "KPushGate.h"
 #ifndef NDEBUG
 void debug_print_wsa_buf(WSABUF* buf, int bc) {
 	for (int i = 0; i < bc; i++) {
@@ -179,10 +180,12 @@ KGL_RESULT KAsyncFetchObject::InternalProcess(KHttpRequest* rq, kfiber** post_fi
 	bool need_request_end = upstream_chunk_post() && post_length == 0 && rq->sink->need_request_end();
 	if (need_request_end && client->IsMultiStream()) client->set_duplex(true);
 	if (upstream_chunk_post() && !client->IsMultiStream() && !KBIT_TEST(rq->sink->data.flags, RQ_HAS_CONNECTION_UPGRADE)) {
+		// HTTP/1 origins need chunked framing for trailers. Known-length
+		// requests otherwise retain Content-Length and stream without buffering;
+		// clients wanting trailers must declare them before the body is sent.
 		for (auto h=rq->sink->data.get_header(); h; h=h->next) {
 			if (kgl_is_attr(h, _KS("Trailer"))) pop_header.post_is_chunk = 1;
 		}
-		if ((post_length != 0 || need_request_end) && rq->sink->data.http_version >= 0x200) pop_header.post_is_chunk = 1;
 	}
 	if (client->IsMultiStream() && upstream_chunk_post()) {
 		for (auto h=rq->sink->data.get_header(); h; h=h->next) {
@@ -227,7 +230,9 @@ KGL_RESULT KAsyncFetchObject::InternalProcess(KHttpRequest* rq, kfiber** post_fi
 		return KGL_ECAN_RETRY_SOCKET_BROKEN;
 	}
 	if (ret != KGL_OK) {
-		return upstream_is_error(rq, STATUS_GATEWAY_TIMEOUT, "cann't read protocol header");
+		// A connected origin can reject one client or request without returning
+		// HTTP headers. Do not disable the shared node for a response failure.
+		return upstream_is_error(rq, STATUS_GATEWAY_TIMEOUT, "cann't read protocol header", false);
 	}
 	return ReadBody(rq);
 }
@@ -431,6 +436,14 @@ KGL_RESULT KAsyncFetchObject::PostResult(KHttpRequest* rq, int got) {
 		}
 		pop_header.post_ended = 1;
 		KHttpHeader* trailer = rq->sink->get_trailer();
+		if (trailer && upstream_chunk_post() && !client->IsMultiStream() && !pop_header.post_is_chunk) {
+			// Content-Length has already been sent. Do not silently discard the
+			// trailers or append them as bytes outside the framed request body.
+			client->shutdown();
+			KBIT_SET(rq->sink->data.flags, RQ_CONNECTION_CLOSE);
+			KGL_RESULT result = send_error2(rq, STATUS_BAD_REQUEST, "request trailers require a Trailer header for Content-Length HTTP/1 upstream");
+			return result == KGL_OK ? KGL_EHAS_SEND_HEADER : result;
+		}
 		if (pop_header.post_is_chunk) {
 			buffer->WSTR("0\r\n");
 		}
@@ -835,7 +848,7 @@ KGL_RESULT KAsyncFetchObject::ParseBody(KHttpRequest* rq, char** data, char* end
 	(*data) += len;
 	return result;
 }
-KGL_RESULT KAsyncFetchObject::upstream_is_error(KHttpRequest* rq, int error, const char* msg) {
+KGL_RESULT KAsyncFetchObject::upstream_is_error(KHttpRequest* rq, int error, const char* msg, bool transport_error) {
 	int err = errno;
 	if (KBIT_TEST(rq->sink->data.flags, RQ_CONNECTION_UPGRADE)) {
 		//return shutdown(rq);
@@ -843,7 +856,7 @@ KGL_RESULT KAsyncFetchObject::upstream_is_error(KHttpRequest* rq, int error, con
 	if (!rq->ctx.read_huped) {
 		KBIT_SET(rq->sink->data.flags, RQ_UPSTREAM_ERROR);
 		if (client) {
-			if (client->IsNew()) {
+			if (transport_error && client->IsNew()) {
 				//new的才计算错误.
 				client->health(HealthStatus::Err);
 			}

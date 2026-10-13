@@ -85,7 +85,23 @@ class HttpOrigin(socketserver.StreamRequestHandler):
             if headers.get(b'transfer-encoding') == b'chunked':
                 body, trailers = chunks(self.rfile)
             else:
-                body = exact(self.rfile, int(headers.get(b'content-length', b'0')))
+                length = int(headers.get(b'content-length', b'0'))
+                if path == b'/streaming' and length:
+                    body = exact(self.rfile, 1)
+                    with self.server.lock:
+                        self.server.stream_prefix = (headers, body)
+                    body += exact(self.rfile, length-1)
+                else:
+                    body = exact(self.rfile, length)
+            if path == b'/framing':
+                with self.server.lock:
+                    self.server.framing = (headers, body, trailers)
+            if path in (b'/fresh-close', b'/stale-close', b'/stale-post-close'):
+                with self.server.lock:
+                    seen = self.server.closed_requests.get(path, 0) + 1
+                    self.server.closed_requests[path] = seen
+                if path == b'/fresh-close' or seen == 2:
+                    return  # Request received, but no response bytes sent.
             if method == b'HEAD':
                 self.wfile.write(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n')
                 self.wfile.flush()
@@ -169,12 +185,12 @@ class H2Origin(socketserver.BaseRequestHandler):
 
 
 class H2Client:
-    def __init__(self, frontend, tls=False):
+    def __init__(self, frontend, tls=False, server_hostname='http.test'):
         self.sock = socket.create_connection(('127.0.0.1', frontend), timeout=5)
         if tls:
             context = ssl._create_unverified_context()
             context.set_alpn_protocols(['h2'])
-            self.sock = context.wrap_socket(self.sock, server_hostname='http.test')
+            self.sock = context.wrap_socket(self.sock, server_hostname=server_hostname)
             assert self.sock.selected_alpn_protocol() == 'h2'
         self.cn = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=True, header_encoding='utf-8', validate_outbound_headers=False, normalize_outbound_headers=False))
         self.cn.initiate_connection()
@@ -218,6 +234,18 @@ class H2Client:
     def done(self, sid):
         self.receive(lambda: sid in self.ended or sid in self.reset)
 
+    def send_body(self, sid, body, end=True):
+        offset = 0
+        while offset < len(body):
+            self.receive(lambda: self.cn.local_flow_control_window(sid) > 0)
+            length = min(len(body)-offset, self.cn.local_flow_control_window(sid), self.cn.max_outbound_frame_size)
+            self.cn.send_data(sid, body[offset:offset+length], end_stream=end and offset+length == len(body))
+            offset += length
+            self.flush()
+        if not body and end:
+            self.cn.end_stream(sid)
+            self.flush()
+
 
 def run(binary):
     root = tempfile.mkdtemp(prefix='kangle-protocol-')
@@ -236,6 +264,9 @@ def run(binary):
         for handler in [HttpOrigin, H2Origin]:
             s = Server(('127.0.0.1', 0), handler)
             s.lock, s.resets = threading.Lock(), 0
+            s.closed_requests = {}
+            s.framing = None
+            s.stream_prefix = None
             servers.append(s)
             threading.Thread(target=s.serve_forever, daemon=True).start()
         http_origin, h2_origin = servers
@@ -247,6 +278,7 @@ def run(binary):
 <listen ip='127.0.0.1' port='{legacy}' type='https' certificate='etc/cert.pem' certificate_key='etc/key.pem' protocols='TLSv1 TLSv1.1 TLSv1.2 TLSv1.3' cipher='DEFAULT:@SECLEVEL=0'/>
 <cache default='0' memory='16M' disk='0'/><request action='allow'/><response action='allow'/>
 <server name='http' host='127.0.0.1' port='{http}' proto='http' life_time='30'/>
+<server name='fresh' host='127.0.0.1' port='{http}' proto='http' life_time='0'/>
 <server name='h2' host='127.0.0.1' port='{h2}h' proto='http' life_time='30'/>
 <vh name='test' doc_root='www' inherit='on'><host>localhost</host>
 <map path='/h1' extend='server:http' confirm_file='0' allow_method='*' replace='/h1/' replace_value='/'/>
@@ -254,6 +286,7 @@ def run(binary):
         # Match the existing map syntax: separate virtual host for HTTP/1 origin.
         cfg = cfg.replace("<map path='/h1' extend='server:http' confirm_file='0' allow_method='*' replace='/h1/' replace_value='/'/>", '')
         cfg = cfg.replace('</config>', "<vh name='http' doc_root='www' inherit='on'><host>http.test</host><map path='/' extend='server:http' confirm_file='0' allow_method='*'/></vh></config>")
+        cfg = cfg.replace('</config>', "<vh name='fresh' doc_root='www' inherit='on'><host>fresh.test</host><map path='/' extend='server:fresh' confirm_file='0' allow_method='*'/></vh></config>")
         with open(root+'/etc/config.xml', 'w') as f:
             f.write(cfg)
         log = open(root+'/console.log', 'wb')
@@ -294,6 +327,110 @@ def run(binary):
         head.close()
         result = raw(b'POST /upload HTTP/1.1\r\nHost: http.test\r\nTransfer-Encoding: chunked\r\nTrailer: X-Upload\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\nX-Upload: request-ok\r\n\r\n')
         check(result[2]==b'abc' and result[3].get(b'x-meta')==b'request-ok', 'HTTP/1 request and response trailers')
+        for tls in [False, True]:
+            for payload, trailer in [(b'log=&pwd=&testcookie=1', False), (b'', False), (b'abc', True),
+                                     (b'x'*65536, False), (b'x'*65537, False), (b'x'*1048576, False),
+                                     (b'x'*65537, True)]:
+                form = H2Client(tlsport if tls else frontend, tls=tls)
+                sid = form.request('/framing', end=False, headers=[(':method', 'POST'),
+                    (':scheme', 'https' if tls else 'http'), (':authority', 'http.test'),
+                    (':path', '/framing'), ('content-type', 'application/x-www-form-urlencoded'),
+                    ('content-length', str(len(payload)))]+([('trailer', 'x-upload')] if trailer else []))
+                if payload:
+                    form.cn.send_data(sid, payload[:1])
+                    form.flush()
+                    time.sleep(.02)  # Headers and body need not arrive together.
+                    form.send_body(sid, payload[1:], end=not trailer)
+                elif not trailer:
+                    form.cn.end_stream(sid)
+                if trailer:
+                    form.cn.send_headers(sid, [('x-upload', 'form-trailer')], end_stream=True)
+                form.flush()
+                form.done(sid)
+                headers, received, trailers = http_origin.framing
+                check(form.headers.get(sid, {}).get(':status') == '200' and received == payload,
+                    'HTTP/2 form body preserved: TLS=%s trailer=%s size=%s' % (tls, trailer, len(payload)))
+                check((headers.get(b'transfer-encoding') == b'chunked' and
+                       b'content-length' not in headers and trailers.get(b'x-upload') == b'form-trailer') if trailer else
+                      (headers.get(b'content-length') == str(len(payload)).encode() and b'transfer-encoding' not in headers),
+                    'HTTP/2 form uses Content-Length unless trailers are declared: TLS=%s trailer=%s' % (tls, trailer))
+                form.sock.close()
+            for size, content_type in [(22, 'application/x-www-form-urlencoded'),
+                                       (1048576, 'application/x-www-form-urlencoded'),
+                                       (1048576, 'application/json'), (1048576, 'application/octet-stream')]:
+                form = H2Client(tlsport if tls else frontend, tls=tls)
+                http_origin.stream_prefix = None
+                sid = form.request('/streaming', end=False, headers=[(':method', 'POST'),
+                    (':scheme', 'https' if tls else 'http'), (':authority', 'http.test'),
+                    (':path', '/streaming'), ('content-type', content_type), ('content-length', str(size))])
+                form.send_body(sid, b'x', end=False)
+                for _ in range(100):
+                    with http_origin.lock:
+                        prefix = http_origin.stream_prefix
+                    if prefix is not None:
+                        break
+                    time.sleep(.02)
+                check(prefix is not None and prefix[0].get(b'content-length') == str(size).encode() and
+                      b'transfer-encoding' not in prefix[0] and prefix[1] == b'x',
+                      'HTTP/2 origin receives first byte before upload completes: TLS=%s size=%d type=%s' % (tls, size, content_type))
+                check(not [name for name in os.listdir(root+'/tmp') if name.startswith('krf')],
+                      'HTTP/2 streaming upload does not spool to a temporary file')
+                form.send_body(sid, b'x'*(size-1))
+                form.done(sid)
+                check(form.headers.get(sid, {}).get(':status') == '200', 'HTTP/2 streamed upload completes')
+                form.sock.close()
+        # Cancellation during a streamed upload must not poison the connection.
+        form = H2Client(frontend)
+        sid = form.request('/framing', end=False, headers=[(':method', 'POST'),
+            (':scheme', 'http'), (':authority', 'http.test'), (':path', '/framing'),
+            ('content-type', 'application/x-www-form-urlencoded'), ('content-length', '1048576')])
+        form.send_body(sid, b'x'*65537, end=False)
+        form.cn.reset_stream(sid)
+        form.flush()
+        sid = form.request('/framing', headers=[(':method', 'POST'), (':scheme', 'http'),
+            (':authority', 'http.test'), (':path', '/framing'),
+            ('content-type', 'application/x-www-form-urlencoded'), ('content-length', '0')])
+        form.done(sid)
+        check(form.headers.get(sid, {}).get(':status') == '200', 'HTTP/2 connection survives canceled large form')
+        sid = form.request('/framing', end=False, headers=[(':method', 'POST'), (':scheme', 'http'),
+            (':authority', 'http.test'), (':path', '/framing'), ('content-length', '3')])
+        form.send_body(sid, b'abc', end=False)
+        form.cn.send_headers(sid, [('x-upload', 'undeclared')], end_stream=True)
+        form.flush()
+        form.done(sid)
+        check(form.headers.get(sid, {}).get(':status') == '400',
+              'HTTP/1 Content-Length upstream rejects undeclared request trailers with clear 400')
+        sid = form.request('/framing', headers=[(':method', 'GET'), (':scheme', 'http'),
+            (':authority', 'http.test'), (':path', '/framing')])
+        form.done(sid)
+        check(form.headers.get(sid, {}).get(':status') == '200', 'HTTP/2 other stream survives undeclared trailer rejection')
+        form.sock.close()
+        for method in [b'GET', b'POST']:
+            before = http_origin.closed_requests.get(b'/fresh-close', 0)
+            result = raw(method+b' /fresh-close HTTP/1.1\r\nHost: fresh.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            check(result[0] == 504 and b"cann't read protocol header" in result[2],
+                'fresh '+method.decode()+' upstream disconnect reported as response read failure')
+            check(http_origin.closed_requests[b'/fresh-close'] == before+1,
+                'fresh '+method.decode()+' upstream disconnect does not replay request')
+        for _ in range(6):
+            result = raw(b'GET /fresh-close HTTP/1.1\r\nHost: fresh.test\r\nConnection: close\r\n\r\n')
+            check(result[0] == 504 and b"cann't read protocol header" in result[2],
+                'per-request response rejection remains a read failure')
+        result = raw(b'GET / HTTP/1.1\r\nHost: fresh.test\r\nConnection: close\r\n\r\n')
+        check(result[0] == 200, 'repeated response rejection does not disable the shared origin')
+        for path, method in [(b'/stale-close', b'GET'), (b'/stale-post-close', b'POST')]:
+            def stale_request(meth):
+                return raw(meth+b' '+path+b' HTTP/1.1\r\nHost: http.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            check(stale_request(b'GET')[0] == 200, 'warm upstream pool for '+method.decode())
+            result = stale_request(method)
+            if method == b'GET':
+                check(result[0] == 200 and http_origin.closed_requests[path] == 3,
+                    'stale pooled GET retries once on a fresh connection')
+            else:
+                check(result[0] == 504 and http_origin.closed_requests[path] == 2,
+                    'stale pooled POST response failure is not replayed')
+                check(stale_request(b'GET')[0] == 200,
+                    'POST upstream disconnect does not poison subsequent requests')
         for bad in [b'Host: http.test\r\nHost: http.test', b'Host: x:65536', b'Host: http.test\r\nContent-Length: 1\r\nTransfer-Encoding: chunked', b'Host: http.test\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked', b'Host: http.test\r\nX-Bad: a\x00b', b'Host: http.test\r\nContent-Length : 0', b'Host: http.test\r\nContent-Length: -1']:
             try:
                 result = raw(b'POST / HTTP/1.1\r\n'+bad+b'\r\nConnection: close\r\n\r\n')
@@ -328,7 +465,8 @@ def run(binary):
         cn = H2Client(frontend)
         for authority in ['localhost', 'http.test']:
             sid = cn.request('/upload', end=False, headers=[(':method', 'POST'), (':scheme', 'http'),
-                (':authority', authority), (':path', '/upload'), ('content-type', 'application/grpc'), ('content-length', '3')])
+                (':authority', authority), (':path', '/upload'), ('content-type', 'application/grpc'), ('content-length', '3')]+
+                ([('trailer', 'x-upload')] if authority == 'http.test' else []))
             cn.cn.send_data(sid, b'abc')
             cn.cn.send_headers(sid, [('x-upload', 'native-request')], end_stream=True)
             cn.flush()
@@ -337,7 +475,8 @@ def run(binary):
             check(sid not in cn.reset and cn.body.get(sid) == b'abc' and cn.trailers.get(sid, {}).get(trailer_key) == 'native-request',
                 'HTTP/2 Content-Length request trailers forwarded to '+authority)
             sid = cn.request('/empty', end=False, headers=[(':method', 'POST'), (':scheme', 'http'),
-                (':authority', authority), (':path', '/empty'), ('content-type', 'text/plain'), ('content-length', '0')])
+                (':authority', authority), (':path', '/empty'), ('content-type', 'text/plain'), ('content-length', '0')]+
+                ([('trailer', 'x-upload')] if authority == 'http.test' else []))
             time.sleep(.05)
             cn.cn.send_headers(sid, [('x-upload', 'empty-request')], end_stream=True)
             cn.flush()
