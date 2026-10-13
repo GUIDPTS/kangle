@@ -76,6 +76,11 @@ class HttpOrigin(socketserver.StreamRequestHandler):
                 return
             method, path, _ = first.split(b' ', 2)
             headers = fields(self.rfile)
+            if path.startswith(b'/authority/'):
+                payload = headers[b'host']
+                self.wfile.write(b'HTTP/1.1 200 OK\r\nCache-Control: no-store\r\nContent-Length: '+str(len(payload)).encode()+b'\r\n\r\n'+payload)
+                self.wfile.flush()
+                continue
             trailers = {}
             if headers.get(b'transfer-encoding') == b'chunked':
                 body, trailers = chunks(self.rfile)
@@ -164,8 +169,13 @@ class H2Origin(socketserver.BaseRequestHandler):
 
 
 class H2Client:
-    def __init__(self, frontend):
+    def __init__(self, frontend, tls=False):
         self.sock = socket.create_connection(('127.0.0.1', frontend), timeout=5)
+        if tls:
+            context = ssl._create_unverified_context()
+            context.set_alpn_protocols(['h2'])
+            self.sock = context.wrap_socket(self.sock, server_hostname='http.test')
+            assert self.sock.selected_alpn_protocol() == 'h2'
         self.cn = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=True, header_encoding='utf-8', validate_outbound_headers=False, normalize_outbound_headers=False))
         self.cn.initiate_connection()
         self.flush()
@@ -296,6 +306,24 @@ def run(binary):
         result = raw(b'GET /generic HTTP/1.1\r\nHost: localhost\r\nTE: trailers\r\nConnection: close\r\n\r\n')
         check(result[0] == 200 and result[2] == b'abc' and result[3].get(b'x-final') == b'yes',
             'HTTP/2 known length response trailers converted for HTTP/1 TE: trailers client')
+
+        for use_tls, authority, expected in [(False, 'http.test', b'http.test'),
+                (True, 'http.test', b'http.test'), (True, 'http.test:443', b'http.test:443'),
+                (True, 'http.test:8443', b'http.test:8443')]:
+            authority_client = H2Client(tlsport if use_tls else frontend, tls=use_tls)
+            authority_headers = [
+                (':method', 'GET'), (':authority', authority),
+                (':scheme', 'https' if use_tls else 'http'), (':path', '/authority/'+str(use_tls)+'/'+authority)]
+            if authority == 'http.test':
+                # An omitted authority port must match the scheme's explicit
+                # default port, regardless of pseudo-header order.
+                authority_headers.append(('host', authority+(':443' if use_tls else ':80')))
+            sid = authority_client.request('/authority/'+str(use_tls)+'/'+authority, headers=authority_headers)
+            authority_client.done(sid)
+            check(authority_client.headers.get(sid, {}).get(':status') == '200' and
+                authority_client.body.get(sid) == expected,
+                'HTTP/2 authority port preserved: TLS=%s authority=%s' % (use_tls, authority))
+            authority_client.sock.close()
 
         cn = H2Client(frontend)
         for authority in ['localhost', 'http.test']:
