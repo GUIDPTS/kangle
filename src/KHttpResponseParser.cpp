@@ -38,14 +38,14 @@ bool KHttpResponseParser::parse_header(KHttpRequest* rq, kgl_header_type attr, c
 		KBIT_SET(obj->index.flags, ANSW_HAS_CONTENT_LENGTH);
 		return true;
 	case kgl_header_date:
-		if (kgl_parse_value_time(val, val_len, &serverDate) != 0) {
-			return false;
-		}
+		// Preserve the upstream header, but do not use invalid dates for age.
+		kgl_parse_value_time(val, val_len, &serverDate);
 		return add_header(attr, val, val_len);
 	case kgl_header_last_modified:
 		time_t last_modified;
 		if (kgl_parse_value_time(val, val_len, &last_modified) != 0) {
-			return false;
+			// An invalid optional validator must not fail an otherwise valid body.
+			return true;
 		}
 		obj->data->set_last_modified(last_modified);
 		return true;
@@ -156,7 +156,8 @@ bool KHttpResponseParser::parse_header(KHttpRequest* rq, kgl_header_type attr, c
 	case kgl_header_expires:
 		if (!KBIT_TEST(obj->index.flags, ANSW_HAS_EXPIRES)) {
 			if (kgl_parse_value_time(val, val_len, &expireDate) != 0) {
-				return false;
+				// Invalid Expires means already expired, not an upstream failure.
+				expireDate = 0;
 			}
 			KBIT_SET(obj->index.flags, ANSW_HAS_EXPIRES);
 		}

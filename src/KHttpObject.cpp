@@ -136,7 +136,8 @@ bool KHttpObject::is_same_precondition(KHttpObject* obj) 	{
 }
 bool KHttpObject::precondition_time(time_t time) {
 	if (!data || !data->etag || !data->i.condition_is_time) {
-		return false;
+		// Without a valid Last-Modified, ignore If-Modified-Since (send 200).
+		return true;
 	}
 	return data->last_modified > time;
 }
@@ -214,13 +215,12 @@ int KHttpObject::GetHeaderSize(int url_len)
 }
 void KHttpObjectBody::set_last_modified(time_t last_modified)
 {
-	if (etag) {
+	// The union must never contain an invalid time with the ETag tag.
+	if (last_modified <= 0 || etag) {
 		return;
 	}
 	this->last_modified = last_modified;
-	if (last_modified > 0) {
-		i.condition_is_time = 1;
-	}
+	i.condition_is_time = 1;
 }
 
 void KHttpObjectBody::set_etag(const char* val, size_t len)

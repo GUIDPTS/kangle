@@ -143,6 +143,19 @@ static void check_fields_and_dates() {
     assert(std::string(date) == "Thu, 01 Jan 1970 00:00:00 GMT" && date[30] == 'x');
     mk1123time(0, date, 1);
     assert(date[0] == '\0');
+    time_t parsed = 123;
+    for (const char* invalid : {"", "invalid", "0", "-1",
+            "Thu, 32 Jan 2026 00:00:00 GMT", "Thu, 01 Jan 2026 25:00:00 GMT"}) {
+        assert(kgl_parse_value_time(invalid, (int)strlen(invalid), &parsed) != 0);
+        assert(parsed == 123); // Failure must not publish the -1 sentinel.
+    }
+    time_t invalid_time = -1;
+    assert(kgl_parse_value_time((const char*)&invalid_time, KGL_HEADER_VALUE_TIME, &parsed) != 0);
+    assert(parsed == 123);
+    assert(kgl_parse_value_time("Thu, 01 Jan 1970 00:00:00 GMT", 29, &parsed) == 0 && parsed == 0);
+    assert(kgl_parse_value_time("Sun, 06 Nov 1994 08:49:37 GMT", 29, &parsed) == 0 && parsed == 784111777);
+    time_t valid_time = 784111777;
+    assert(kgl_parse_value_time((const char*)&valid_time, KGL_HEADER_VALUE_TIME, &parsed) == 0 && parsed == valid_time);
 }
 
 static void check_cache_flush_failure() {
