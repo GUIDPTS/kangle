@@ -41,7 +41,9 @@ public:
 		this->unix_path = path;
 		struct sockaddr_un addr;
 		ksocket_unix_addr(path,&addr);
-		SOCKET sockfd = ksocket_listen((sockaddr_i *)&addr, 0);
+		// CGI children inherit this listener and expect accept() to block.
+		// EAGAIN between connections makes PHP-CGI exit instead of waiting.
+		SOCKET sockfd = ksocket_listen((sockaddr_i *)&addr, KSOCKET_BLOCK);
 		if (!ksocket_opened(sockfd)) {
 			return false;
 		}

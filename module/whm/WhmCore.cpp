@@ -572,6 +572,12 @@ int WhmCore::call_info(const char* call_name, const char* event_type, WhmContext
 	cache.getSize(total_mem_size, total_disk_size, mem_count, disk_count);
 	ctx->add("server", PROGRAM_NAME);
 	ctx->add("version", VERSION);
+	// Report build capability independently of listener/vhost configuration.
+#ifdef ENABLE_HTTP3
+	ctx->add("support_http3", 1);
+#else
+	ctx->add("support_http3", 0);
+#endif
 	ctx->add("type", getServerType());
 	ctx->add("os", getOsType());
 	int total_run_time = (int)(kgl_current_sec - kgl_program_start_sec);
