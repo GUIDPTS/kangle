@@ -91,9 +91,22 @@ ACL 是条件匹配模块，Mark 是命中规则时执行的处理模块。它�
 | `map_host` | 请求/响应 | `file` | 从文件加载主机映射，适合较大的域名集合。 |
 | `meth` | 请求/响应 | `meth` | 匹配 HTTP 方法，多个方法按模块支持的列表格式填写。 |
 | `dst_port` | 请求/响应 | `port` | 匹配 URL 中的目标端口。 |
-| `referer` | 请求 | `host` | 按域名/泛域名列表匹配 Referer 主机。 |
+| `referer` | 请求 | `host`、`referer` | 按域名/泛域名列表匹配 Referer 主机；`referer="EqHost"` 匹配与当前请求相同的主机名。 |
 | `time` | 请求 | `time` | 按项目的 cron 时间表达式匹配当前时间。 |
 | `try_file` | 请求 | 无 | 检查当前 URL 是否能映射到可用文件。 |
+
+`referer` 默认使用 `host` 中以 `|` 分隔的域名列表，`-` 表示允许没有 Referer 的请求。
+设置 `referer="EqHost"` 时，改为比较 Referer 的主机名与客户端原始请求主机名，忽略大小写，
+不比较协议及端口，也不受后续上游 Host 改写影响。此模式不使用 `host` 中的域名列表；
+缺少 Referer 时仍仅由 `host` 中是否包含 `-` 决定匹配结果。无效或不含主机名的 Referer 不匹配。
+
+例如，拒绝来源主机名与当前请求不一致的请求：
+
+```xml
+<chain action="deny">
+  <acl module="referer" referer="EqHost" revers="1"/>
+</chain>
+```
 
 `path` 示例：
 
