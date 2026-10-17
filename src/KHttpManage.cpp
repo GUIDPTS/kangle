@@ -10,6 +10,7 @@
 #include "log.h"
 #include <map>
 #include <vector>
+#include <set>
 #include <sstream>
 #include <iostream>
 #include <cerrno>
@@ -46,6 +47,7 @@
 #include "KDefer.h"
 #include "KChain.h"
 #include "kmd5.h"
+#include "KWhiteList.h"
 
 using namespace std;
 using namespace kangle;
@@ -1002,7 +1004,68 @@ bool KHttpManage::sendLeftMenu() {
 	s << "</table></body></html>";
 	return sendHttp(s.str().c_str());
 }
-bool KHttpManage::sendMainFrame() {
+#ifdef ENABLE_BLACK_LIST
+void KHttpManage::runtimeBlackLists(bool clear, size_t& global_count, size_t& vh_count)
+{
+	std::vector<KIpList*> lists;
+	std::set<KIpList*> seen;
+	KIpList* global = conf.gvm->vhs.blackList;
+	if (global) seen.insert(global);
+	{
+		auto locker = conf.gvm->locker();
+		for (auto& entry : conf.gvm->avh) {
+			KIpList* list = entry.second->blackList;
+			if (list && seen.insert(list).second) {
+				list->addRef();
+				lists.push_back(list);
+			}
+		}
+	}
+	global_count = global ? (clear ? global->clearDynamic() : global->getDynamicCount()) : 0;
+	vh_count = 0;
+	for (auto list : lists) {
+		vh_count += clear ? list->clearDynamic() : list->getDynamicCount();
+		list->release();
+	}
+}
+bool KHttpManage::clearRuntimeIpList()
+{
+	// Basic-authenticated browser requests also need a same-origin check.
+	// Never expose a destructive GET action or accept cross-site form posts.
+	if (rq->sink->data.meth != METH_POST) {
+		return sendErrPage("POST required");
+	}
+	auto header = rq->sink->data.find(_KS("Origin"));
+	if (!header) header = rq->sink->data.find(_KS("Referer"));
+	KUrl origin(false);
+	const KUrl& target = rq->sink->data.raw_url;
+	if (!header || !target.host) return sendErrPage("same-origin POST required");
+	std::string origin_text(header->buf + header->val_offset, header->val_len);
+	if (origin_text.compare(0, 7, "http://") != 0 && origin_text.compare(0, 8, "https://") != 0) {
+		return sendErrPage("same-origin POST required");
+	}
+	// Origin has no path, whereas parse_url expects an absolute URL path.
+	if (origin_text.find('/', origin_text.find("://") + 3) == std::string::npos) origin_text += '/';
+	if (!parse_url(origin_text.c_str(), &origin) || !origin.host ||
+		strcasecmp(origin.host, target.host) != 0 || origin.port != target.port ||
+		KBIT_TEST(origin.flags, KGL_URL_ORIG_SSL) != KBIT_TEST(target.flags, KGL_URL_ORIG_SSL)) {
+		return sendErrPage("same-origin POST required");
+	}
+	const KString& type = getUrlValue("type");
+	KStringBuf notice;
+	if (type == "black") {
+		size_t global_count, vh_count;
+		runtimeBlackLists(true, global_count, vh_count);
+		notice << klang["runtime_blacklist"] << ": " << klang["ip_list_cleared"] << " " << (global_count + vh_count);
+	} else if (type == "white") {
+		notice << klang["runtime_whitelist"] << ": " << klang["ip_list_cleared"] << " " << wlm.clear();
+	} else {
+		return sendErrPage("invalid list type");
+	}
+	return sendMainFrame(notice.str());
+}
+#endif
+bool KHttpManage::sendMainFrame(const KString& notice) {
 	KStringBuf s;
 	char buf[256];
 	INT64 total_mem_size = 0, total_disk_size = 0;
@@ -1062,6 +1125,28 @@ bool KHttpManage::sendMainFrame() {
 		total_run_time %= 60;
 	}
 	s << total_run_time << " " << LANG_SECOND << ". pid: " << getpid();
+	// These are runtime lists, not configured fixed IP or ACL exceptions.
+#ifdef ENABLE_BLACK_LIST
+	size_t global_black_count, vh_black_count;
+	runtimeBlackLists(false, global_black_count, vh_black_count);
+	s << "<h3>" << klang["runtime_ip_lists"] << "</h3>";
+	if (!notice.empty()) s << "<p id='ip_list_notice'>" << notice << "</p>";
+	s << "<table><tr><td>" << klang["runtime_blacklist"] << "</td><td><span id='runtime_black_count'>"
+		<< (global_black_count + vh_black_count) << "</span> (" << klang["ip_list_global"] << ": <span id='runtime_global_black_count'>"
+		<< global_black_count << "</span>, " << klang["ip_list_vhosts"] << ": <span id='runtime_vh_black_count'>"
+		<< vh_black_count << "</span>)</td><td>";
+	s << "<form id='clear_runtime_black_form' action='/clear_runtime_ip_list' method='post' style='display:none'>"
+		<< "<input type='hidden' name='type' value='black'></form>"
+		<< "[<a href='#' onclick=\"if(confirm('" << klang["clear_runtime_blacklist_confirm"]
+		<< "')){document.getElementById('clear_runtime_black_form').submit();}return false;\">"
+		<< klang["clear_runtime_blacklist"] << "</a>]</td></tr>";
+	s << "<tr><td>" << klang["runtime_whitelist"] << "</td><td><span id='runtime_white_count'>" << wlm.getCount() << "</span></td><td>";
+	s << "<form id='clear_runtime_white_form' action='/clear_runtime_ip_list' method='post' style='display:none'>"
+		<< "<input type='hidden' name='type' value='white'></form>"
+		<< "[<a href='#' onclick=\"if(confirm('" << klang["clear_runtime_whitelist_confirm"]
+		<< "')){document.getElementById('clear_runtime_white_form').submit();}return false;\">"
+		<< klang["clear_runtime_whitelist"] << "</a>]</td></tr></table>";
+#endif
 	s << "<h3>" << klang["load_info"] << "</h3>";
 	s << "<table>";
 	//connect
@@ -1844,6 +1929,11 @@ bool KHttpManage::start(bool& hit) {
 	if (strcmp(rq->sink->data.url->path, "/main") == 0) {
 		return sendMainFrame();
 	}
+#ifdef ENABLE_BLACK_LIST
+	if (strcmp(rq->sink->data.url->path, "/clear_runtime_ip_list") == 0) {
+		return clearRuntimeIpList();
+	}
+#endif
 
 	if (strcmp(rq->sink->data.url->path, "/config") == 0) {
 		return config();

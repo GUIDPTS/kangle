@@ -229,6 +229,8 @@ public:
 	}
 	void getBlackList(WhmContext *ctx);
 	void clearBlackList();
+	size_t getDynamicCount();
+	size_t clearDynamic();
 	//volatile int64_t upstream_request_count;
 private:
 	~KIpList()
