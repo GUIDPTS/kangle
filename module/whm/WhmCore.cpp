@@ -574,9 +574,9 @@ int WhmCore::call_info(const char* call_name, const char* event_type, WhmContext
 	ctx->add("version", VERSION);
 	// Report build capability independently of listener/vhost configuration.
 #ifdef ENABLE_HTTP3
-	ctx->add("support_http3", 1);
+	ctx->add("support_http3", static_cast<INT64>(1));
 #else
-	ctx->add("support_http3", 0);
+	ctx->add("support_http3", static_cast<INT64>(0));
 #endif
 	ctx->add("type", getServerType());
 	ctx->add("os", getOsType());
