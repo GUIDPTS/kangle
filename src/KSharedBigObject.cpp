@@ -341,7 +341,10 @@ void KSharedBigObject::close_write(KHttpObject* obj, int64_t write_from) {
 		if (cache_result) {
 			// Persist the completed cache metadata.
 			KBIT_SET(nobj->index.flags, FLAG_IN_DISK);
-			dci->start(ci_update, nobj);
+			/* dci is deleted on shutdown while downloads may still finish. */
+			if (dci) {
+				dci->start(ci_update, nobj);
+			}
 			aio_buffer = nobj->build_aio_header(aio_buffer_size, nullptr, 0);
 		} else {
 			KBIT_SET(obj->index.flags, FLAG_IN_DISK);
@@ -566,6 +569,10 @@ bool KSharedBigObject::restore(char* buf, int length) {
 	KFileBlock* pi = (KFileBlock*)buf;
 	kfiber_mutex_lock(lock);
 	while (length >= (int)sizeof(KFileBlock)) {
+		if (pi->from < 0 || pi->to < pi->from) {
+			/* a damaged progress file; let swap in fail instead of trusting it. */
+			break;
+		}
 		length -= sizeof(KFileBlock);
 		bool new_obj;
 		krb_node* node = insert(pi->from, new_obj);

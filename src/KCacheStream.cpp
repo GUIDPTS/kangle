@@ -32,7 +32,11 @@ void KCacheStream::init(KHttpObject *obj, cache_model cache_layer)
 KGL_RESULT cache_close(kgl_response_body_ctx* ctx, KGL_RESULT result) {
 	KCacheStream* cache = (KCacheStream*)ctx;
 	result = cache->down_body.f->close(cache->down_body.ctx, result);
-	if (result == KGL_OK) {
+	/*
+	 * A dechunked upstream body finishes with KGL_END once the last chunk is
+	 * read. It is complete, so it must be cacheable like a KGL_OK body.
+	 */
+	if (result == KGL_OK || result == KGL_END) {
 		bool have_cache = (cache->buffer != NULL);
 #ifdef ENABLE_DISK_CACHE
 		if (cache->disk_cache) {

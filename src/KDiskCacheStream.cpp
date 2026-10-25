@@ -1,6 +1,9 @@
 #include "KDiskCacheStream.h"
 #include "KHttpRequest.h"
 #include "KHttpObject.h"
+#ifdef LINUX_EPOLL
+#include <unistd.h>
+#endif
 #ifdef ENABLE_DISK_CACHE
 
 bool KDiskCacheStream::Open(KHttpObject *obj)
@@ -42,6 +45,8 @@ bool KDiskCacheStream::Write(KHttpObject *obj, const char *buf, int len)
 			if (buffer_size < 4096) {
 				buffer_size = 4096;
 			}
+			/* direct I/O writes need a length aligned to the block size. */
+			buffer_size = (int)kgl_align((size_t)buffer_size, kgl_aio_align_size);
 			buffer_left = buffer_size;
 			buffer = (char *)aio_alloc_buffer(buffer_size);
 			if (buffer == nullptr) {
@@ -67,9 +72,22 @@ bool KDiskCacheStream::Write(KHttpObject *obj, const char *buf, int len)
 
 bool KDiskCacheStream::Close(KHttpObject *obj)
 {
-	if (fp == nullptr || !FlushBuffer()) {
+	if (fp == nullptr) {
 		return false;
 	}
+	int64_t data_end = kfiber_file_tell(fp) + (buffer ? (int64_t)(hot - buffer) : 0);
+	if (!FlushBuffer(true)) {
+		return false;
+	}
+#ifdef LINUX_EPOLL
+	if (fp->st.direct_io && kfiber_file_tell(fp) != data_end) {
+		/* drop the zero padding written by the last aligned direct I/O block. */
+		if (ftruncate(kasync_file_get_handle(fp), data_end) != 0) {
+			return false;
+		}
+		kfiber_file_seek(fp, seekBegin, data_end);
+	}
+#endif
 	int64_t content_length = GetLength(obj);
 	if (content_length < 0) {
 		return false;
@@ -96,7 +114,7 @@ bool KDiskCacheStream::Close(KHttpObject *obj)
 	fp = NULL;
 	return true;
 }
-bool KDiskCacheStream::FlushBuffer()
+bool KDiskCacheStream::FlushBuffer(bool last)
 {
 	if (fp == nullptr) {
 		return false;
@@ -105,6 +123,20 @@ bool KDiskCacheStream::FlushBuffer()
 		return true;
 	}
 	int size = (int)(hot - buffer);
+#ifdef LINUX_EPOLL
+	if (last && fp->st.direct_io) {
+		/*
+		 * O_DIRECT rejects a write whose length is not block aligned, so the
+		 * final partial block used to fail and the whole cache file was
+		 * dropped. Pad with zeros here; Close() truncates the padding.
+		 */
+		int aligned = (int)kgl_align((size_t)size, kgl_aio_align_size);
+		if (aligned > size && aligned <= buffer_size) {
+			memset(hot, 0, aligned - size);
+			size = aligned;
+		}
+	}
+#endif
 	hot = buffer;
 	while (size > 0) {
 		int got = kfiber_file_write(fp, hot, size);

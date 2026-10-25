@@ -59,7 +59,7 @@ private:
 		hot = buffer;
 		buffer_left = buffer ? buffer_size : 0;
 	}
-	bool FlushBuffer();
+	bool FlushBuffer(bool last = false);
 	char *filename;
 	kfiber_file* fp;
 	char* buffer;

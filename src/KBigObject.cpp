@@ -27,7 +27,7 @@ KGL_RESULT turn_on_bigobject(KHttpRequest* rq, KHttpObject* obj, kgl_response_bo
 	obj->dc_index_update = 1;
 	rq->store_obj();
 	assert(obj->list_state != LIST_IN_NONE);
-	if (obj->list_state != LIST_IN_NONE) {
+	if (obj->list_state != LIST_IN_NONE && dci) {
 		dci->start(ci_add, obj);
 	}
 	KBigObjectContext* bo_ctx = new KBigObjectContext(rq, obj);

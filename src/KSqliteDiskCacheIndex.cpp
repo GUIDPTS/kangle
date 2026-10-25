@@ -140,7 +140,8 @@ bool KSqliteDiskCacheIndex::add(unsigned filename1,unsigned filename2,const char
 	if (db==NULL) {
 		return false;
 	}
-	const char *sql = "insert into cache (f1,f2,url,data) values (?,?,?,?)";
+	/* a rescan can add a file whose row already exists; keep the newest data. */
+	const char *sql = "insert or replace into cache (f1,f2,url,data) values (?,?,?,?)";
 	sqlite3_stmt *stmt;
 	if (SQLITE_OK != sqlite3_prepare(db,sql,-1,&stmt,NULL)) {
 		return false;
