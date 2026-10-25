@@ -38,6 +38,9 @@ public:
 		return this->proto != rd->proto;
 	}
 	virtual void shutdown() = 0;
+	/* close expired idle connections, called by the gc thread. */
+	virtual void refresh_pool(time_t now_time) {
+	}
 	void remove() {
 		shutdown();
 		release();

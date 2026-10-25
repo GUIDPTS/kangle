@@ -70,7 +70,7 @@ static kgl_response_body_function zstd_function = {
 	unsupport_sendfile,
 	zstd_close,
 };
-bool pipe_zstd_compress(int level, kgl_response_body* body) {
+bool pipe_zstd_compress(int level, kgl_response_body* body, int64_t content_len) {
 	auto ctx = ZSTD_createCCtx();
 	if (ctx == NULL) {
 		return false;
@@ -78,6 +78,26 @@ bool pipe_zstd_compress(int level, kgl_response_body* body) {
 	if (ZSTD_isError(ZSTD_CCtx_setParameter(ctx, ZSTD_c_compressionLevel, level))) {
 		ZSTD_freeCCtx(ctx);
 		return false;
+	}
+	/*
+	 * A streaming context without a size uses the full window of the level
+	 * (2MB at level 5) for every response. A window that covers the whole
+	 * body gives the same output with far less memory. 512KB is not above
+	 * the default window of any level, so larger bodies keep the default.
+	 * The size is only a hint: a body of another length still compresses.
+	 */
+	if (content_len > 0 && content_len < (1 << 19)) {
+		int window_log = 1;
+		while (((int64_t)1 << window_log) < content_len) {
+			window_log++;
+		}
+		ZSTD_bounds bounds = ZSTD_cParam_getBounds(ZSTD_c_windowLog);
+		if (!ZSTD_isError(bounds.error)) {
+			if (window_log < bounds.lowerBound) {
+				window_log = bounds.lowerBound;
+			}
+			ZSTD_CCtx_setParameter(ctx, ZSTD_c_windowLog, window_log);
+		}
 	}
 	zstd_context* zstd = new zstd_context;
 	zstd->ctx = ctx;

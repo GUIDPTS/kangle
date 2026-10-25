@@ -347,6 +347,25 @@ void KAcserverManager::killAllProcess(KVirtualHost* vh) {
 	}
 #endif
 }
+void KAcserverManager::refreshPool(time_t nowTime) {
+	if (nowTime <= 0) {
+		/* refresh(0) means close every idle connection. */
+		return;
+	}
+	/*
+	 * Idle pooled sockets used to be expired only when the same server was
+	 * requested again, so peer-closed connections could stay open forever.
+	 */
+	auto locker = get_rlocker();
+	for (auto&& it : acservers) {
+		it.second->refresh_pool(nowTime);
+	}
+#ifdef ENABLE_MULTI_SERVER
+	for (auto&& it : mservers) {
+		it.second->refresh_pool(nowTime);
+	}
+#endif
+}
 #ifdef ENABLE_VH_RUN_AS
 void KAcserverManager::refreshCmd(time_t nowTime) {
 

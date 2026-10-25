@@ -36,7 +36,7 @@ bool pipe_compress_stream(KHttpRequest* rq, KHttpObject* obj, int64_t content_le
 	}
 #ifdef ENABLE_ZSTD
 	if (conf.zstd_level > 0 && KBIT_TEST(rq->sink->data.raw_url.accept_encoding, KGL_ENCODING_ZSTD)) {
-		if (pipe_zstd_compress(conf.zstd_level, body)) {
+		if (pipe_zstd_compress(conf.zstd_level, body, content_len)) {
 			obj->AddContentEncoding(KGL_ENCODING_ZSTD, kgl_expand_string("zstd"));
 			return true;
 		}
@@ -44,7 +44,7 @@ bool pipe_compress_stream(KHttpRequest* rq, KHttpObject* obj, int64_t content_le
 #endif
 #ifdef ENABLE_BROTLI
 	if (conf.br_level > 0 && KBIT_TEST(rq->sink->data.raw_url.accept_encoding, KGL_ENCODING_BR)) {		
-		if (pipe_brotli_compress(conf.br_level, body)) {
+		if (pipe_brotli_compress(conf.br_level, body, content_len)) {
 			obj->AddContentEncoding(KGL_ENCODING_BR, kgl_expand_string("br"));
 			return true;
 		}

@@ -531,6 +531,18 @@ void KMultiAcserver::shutdown() {
 	}
 	lock.Unlock();
 }
+void KMultiAcserver::refresh_pool(time_t now_time) {
+	lock.Lock();
+	KSockPoolHelper* node = nodes;
+	while (node) {
+		node->refresh(now_time);
+		node = node->next;
+		if (node == nodes) {
+			break;
+		}
+	}
+	lock.Unlock();
+}
 void KMultiAcserver::getNodeInfo(KWStream& s) {
 	lock.Lock();
 	KSockPoolHelper* node = nodes;

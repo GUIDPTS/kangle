@@ -51,6 +51,8 @@ public:
 	void dump_process(kgl::serializable *sl);
 #endif	
 	void killAllProcess(KVirtualHost* vh);
+	/* close expired idle upstream connections of server/mserver pools. */
+	void refreshPool(time_t nowTime);
 	void shutdown();
 	/* 全部准备好了，可以加载所有的api了。*/
 	void loadAllApi();

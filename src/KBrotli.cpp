@@ -63,7 +63,7 @@ static kgl_response_body_function brotli_function = {
 	unsupport_sendfile,
 	brotli_close,
 };
-bool pipe_brotli_compress(int level, kgl_response_body* body) {
+bool pipe_brotli_compress(int level, kgl_response_body* body, int64_t content_len) {
 	BrotliEncoderState *state = BrotliEncoderCreateInstance(NULL, NULL, NULL);
 	if (!state) {
 		return false;
@@ -71,6 +71,22 @@ bool pipe_brotli_compress(int level, kgl_response_body* body) {
 	if (!BrotliEncoderSetParameter(state, BROTLI_PARAM_QUALITY, level)) {
 		BrotliEncoderDestroyInstance(state);
 		return false;
+	}
+	/*
+	 * Streaming without a size uses the default 4MB window and its hash
+	 * tables. A window that covers the whole body gives the same output with
+	 * less memory. The size is a hint only, so a different body length is fine.
+	 */
+	if (content_len > 0 && content_len <= (int64_t)UINT32_MAX) {
+		BrotliEncoderSetParameter(state, BROTLI_PARAM_SIZE_HINT, (uint32_t)content_len);
+		int lgwin = BROTLI_MIN_WINDOW_BITS;
+		/* the usable window is (1 << lgwin) - 16 bytes. */
+		while (lgwin < BROTLI_DEFAULT_WINDOW && ((int64_t)1 << lgwin) - 16 < content_len) {
+			lgwin++;
+		}
+		if (lgwin < BROTLI_DEFAULT_WINDOW) {
+			BrotliEncoderSetParameter(state, BROTLI_PARAM_LGWIN, (uint32_t)lgwin);
+		}
 	}
 	brotli_context* br = new brotli_context;
 	br->state = state;

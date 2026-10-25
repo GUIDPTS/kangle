@@ -215,6 +215,9 @@ KTHREAD_FUNCTION time_thread(void* arg) {
 #ifndef HTTP_PROXY
 		conf.gam->refreshCmd(nowTime);
 #endif
+		if (conf.gam) {
+			conf.gam->refreshPool(nowTime);
+		}
 #ifdef ENABLE_ADPP
 		if (conf.process_cpu_usage > 0) {
 			ULONG64 cpuTime = KProcess::getCpuTime();
