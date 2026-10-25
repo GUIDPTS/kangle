@@ -234,15 +234,73 @@ Header 名应使用标准 HTTP 字段名。`remove_header@val` 是忽略大小�
 | `cache_control` | 响应 | `max_age`、`force`、`static`、`must_revalidate` | 设置缓存寿命，或在相应构建中强制缓存。 |
 | `guest_cache` | 响应 | `max_age`、`last_modified`、`soft`、`must_revalidate`、`skip_set_cookie` | 将已标记为访客的不可缓存响应转为访客缓存；默认拒绝缓存带 `Set-Cookie` 的响应。 |
 | `response_flag` | 响应 | `flagvalue` | 逗号分隔：`compress`、`nocache`、`nodiskcache`、`cache_response`、`identity_encoding`。兼容值 `gzip` 等同 `compress`。 |
-| `flag` | 请求/响应 | 多个布尔属性、`clear`、`age` | 设置请求处理标志，详见下一节。 |
+| `flag` | 请求/响应 | 多个布尔属性、`clear`、`age` | 设置请求处理标志，详见下文。 |
 | `min_obj_verified` | 请求 | `v`、`hard` | 设置大对象验证阈值。 |
 | `vary` | 响应 | `header` | 把指定请求头加入缓存 Vary 维度。 |
 
-`flag` 是历史综合模块，当前源码识别以下属性：
+#### `flag` 选项详解
 
-`no_cache`、`no_disk_cache`、`guest`、`always_online`、`ignore_error`、`no_buffer`、`follow_link_all`、`follow_link_own`、`no_x_sendfile`、`no_x_forwarded_for`、`x_real_ip`、`via`、`x_cache`、`proxy_full_url`、`raw_proxy`、`upstream_noka`、`upstream_nosni`、`tproxy_upstream`、`tproxy_trust_dns`、`double_cache_expire`、`log_drill`、`age` 和 `clear`。
+`flag` 是综合处理标志模块，将选中的标志设置到当前请求上下文中。各属性填写 `1` 表示选中；
+未填写或填写 `0` 表示本条 Mark 不操作该标志，并不会取消前面规则已经设置的同名标志。
 
-这些开关会直接影响缓存、代理和安全行为。除非已理解源码语义，优先使用用途更单一的 Mark；要清除对应标志时使用 `clear='1'`。
+`clear` 决定本条 Mark 是设置还是清除选中的标志：
+
+| 属性 | 含义 |
+| --- | --- |
+| `clear='0'` 或省略 | 设置本条 Mark 中取值为 `1` 的标志。 |
+| `clear='1'` | 清除本条 Mark 中取值为 `1` 的标志，管理界面显示为 `clear flag`。不会清空所有标志；未选中其他属性时不产生清除效果。 |
+
+例如，`clear='1' no_cache='1'` 表示取消此前的“不缓存”标志。后面的规则可以继续设置或清除标志，
+但清除标志不能撤销已经完成的缓存查找、回源请求头发送等操作。
+
+缓存相关选项：
+
+| 属性 | 含义及注意事项 |
+| --- | --- |
+| `no_cache` | 请求阶段设置后，绕过 kangle 缓存查找，并使本次响应不进入缓存。不会自动设置浏览器的 `Cache-Control`，浏览器缓存策略需另外配置响应头。 |
+| `no_disk_cache` | 本次请求不使用磁盘缓存，仍可使用内存缓存；新缓存内容也不会写入磁盘。不会删除已有的磁盘缓存文件。 |
+| `guest` | 将当前请求标记为游客请求，配合响应阶段的 `guest_cache` 模块使用。不会自动判断登录状态，也不会单独将不可缓存响应转为可缓存响应。 |
+| `double_cache_expire` | 判断缓存新鲜度时，将原有新鲜度期限乘以 2，例如将 60 秒按 120 秒判断。不会永久修改源站发送的 `Cache-Control`。 |
+| `always_online` | 旧缓存保留相关标志。当前仍有保留旧缓存的代码，但错误处理中的“源站异常时直接返回旧缓存”分支被 `#if 0` 禁用，不能作为完整的故障离线缓存保证。 |
+| `ignore_error` | `always_online` 的兼容参数别名，两者设置同一个标志；不表示忽略所有请求错误。 |
+
+回源及请求头相关选项：
+
+| 属性 | 含义及注意事项 |
+| --- | --- |
+| `upstream_noka` | 管理界面显示为“上流短连接”。HTTP/1 回源请求发送 `Connection: close`，要求源站在本次响应结束后关闭连接。 |
+| `raw_proxy` | 管理界面显示为“原始 URL 代理”。代理回源时采用改写前的原始 URL、Host；用于需要保留原始请求地址的场景。 |
+| `proxy_full_url` | HTTP/1 回源请求行使用完整 URL，例如 `GET http://example.com/a.jpg HTTP/1.1`，适用于上游本身是正向代理服务器的情况。 |
+| `x_real_ip` | 回源时覆盖原有 `X-Real-IP` 并发送 kangle 当前识别的客户端 IP；HTTP/1 回源还会覆盖并生成 `X-Forwarded-Proto: http` 或 `https`。若前面执行过 `replace_ip`，使用替换后的 IP。 |
+| `no_x_forwarded_for` | 停止自动生成或追加 `X-Forwarded-For`，不会主动删除客户端已经传入的同名头。界面文案 `no_x_forwared_for` 是拼写错误，配置属性仍为 `no_x_forwarded_for`。 |
+| `via` | 在回源请求中添加或追加 `Via`，标识经过的代理节点及协议版本。 |
+| `no_buffer` | 读取回源正文时及时刷新下游输出缓冲，减少流式响应的等待，适合 SSE 等需要及时输出的场景。不会自动禁用缓存，需要时另设 `no_cache`。 |
+| `no_x_sendfile` | 不将源站返回的 `X-Accel-Redirect`、`X-Proxy-Redirect` 作为内部转发指令处理；作用于这些响应头指令。 |
+
+本地文件访问相关选项：
+
+| 属性 | 含义及注意事项 |
+| --- | --- |
+| `follow_link_all` | 允许跟随符号链接访问目标文件，包括链接指向网站目录外的目标；仍受操作系统文件权限约束。 |
+| `follow_link_own` | 仅当符号链接本身与目标文件的所有者 UID 相同时，才允许跟随。两项同时设置时，当前请求优先采用此项的限制。 |
+
+符号链接选项主要作用于本地文件映射，其具体行为也受操作系统影响；普通 CDN HTTP 回源通常不需要设置。
+
+诊断和响应头相关选项：
+
+| 属性 | 含义及注意事项 |
+| --- | --- |
+| `x_cache` | 给客户端响应增加 `X-Cache`，显示 `HIT`、`MISS` 或 `HIT-PART` 及节点名称，用于查看缓存命中情况。 |
+| `age` | 对符合条件的缓存对象输出 `Age` 响应头，单位为秒；对象被标记为不可缓存、失效或年龄为 0 时可能不输出。 |
+| `log_drill` | 将命中请求纳入诊断/钻取日志，受全局 `log_drill` 容量配置控制。与虚拟主机的独立 `access.log` 设置分别管理。 |
+
+特殊及依赖编译功能的选项：
+
+| 属性 | 含义及当前实现状态 |
+| --- | --- |
+| `upstream_nosni` | 名义上用于禁止 HTTPS 回源发送 SNI。当前源码只设置/展示该标志，没有实际读取该标志并控制回源 SNI 的调用点，不能依靠本选项生效。 |
+| `tproxy_trust_dns` | 仅在编译了相应透明代理功能、且请求进入透明代理路径时使用。在该路径中采用被截获连接的目标地址和端口回源，普通 CDN 模式无需设置。 |
+| `tproxy_upstream` | 在上述 `tproxy_trust_dns` 对应的透明代理路径中，尝试将客户端 IP 作为回源连接的本地绑定地址，需要操作系统和网络环境配合。普通 CDN 模式无需设置。 |
 
 ### 限速、队列和统计
 
