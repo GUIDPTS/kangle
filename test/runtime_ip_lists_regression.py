@@ -150,8 +150,9 @@ def main():
                 check(html.index('runtime_black_count') < html.index('runtime_white_count') and
                       html.count("action='/clear_runtime_ip_list'") == 2 and "value='all'" not in html,
                       'homepage has exactly the two separate clear actions')
-                section = html[html.index('<h3>Runtime IP lists</h3>'):html.index('<h3>load info</h3>')]
-                check(html.index('<h3>uptime</h3>') < html.index('<h3>Runtime IP lists</h3>') and
+                # runtime_ip_lists in webadmin/lang_en.xml
+                section = html[html.index('<h3>IP lists</h3>'):html.index('<h3>load info</h3>')]
+                check(html.index('<h3>uptime</h3>') < html.index('<h3>IP lists</h3>') and
                       "type='submit'" not in section and section.count('[<a ') == 2 and
                       "getElementById('clear_runtime_black_form').submit()" in section and
                       "getElementById('clear_runtime_white_form').submit()" in section and

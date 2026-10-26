@@ -567,13 +567,18 @@ def run(binary):
         check(healthy.body.get(sid) == b'abc', 'HTTP/2 healthy connection after control-frame floods')
         healthy.sock.close()
 
+        def client_ciphers(executable):
+            # Permit legacy ciphers in the client so a refusal is actually
+            # testing the listener's policy, not OpenSSL's local defaults.
+            # OpenSSL 1.0.x has no security levels and rejects @SECLEVEL,
+            # which would make every connection fail on the client side.
+            probe=subprocess.run([executable,'ciphers','DEFAULT:@SECLEVEL=0'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            return 'DEFAULT:@SECLEVEL=0' if probe.returncode == 0 else 'DEFAULT'
         def tls(version, target):
             executable=os.environ.get('KANGLE_TEST_OPENSSL','openssl')
             if version == 'tls1_3':
                 executable=os.environ.get('KANGLE_TEST_OPENSSL13', executable)
-            # Permit legacy ciphers in the client so a refusal is actually
-            # testing the listener's policy, not OpenSSL's local defaults.
-            result=subprocess.run([executable,'s_client','-ign_eof','-cipher','DEFAULT:@SECLEVEL=0','-connect','127.0.0.1:'+str(target),'-servername','http.test','-'+version], input=b'GET / HTTP/1.1\r\nHost: http.test\r\nConnection: close\r\n\r\n',stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=8)
+            result=subprocess.run([executable,'s_client','-ign_eof','-cipher',client_ciphers(executable),'-connect','127.0.0.1:'+str(target),'-servername','http.test','-'+version], input=b'GET / HTTP/1.1\r\nHost: http.test\r\nConnection: close\r\n\r\n',stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=8)
             with open(root+'/tls-'+str(target)+'-'+version+'.log','wb') as f:
                 f.write(result.stdout)
             return b'HTTP/1.1 200' in result.stdout
