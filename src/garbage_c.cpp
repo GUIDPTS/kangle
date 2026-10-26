@@ -35,6 +35,7 @@
 #include "kthread.h"
 #include "KBuffer.h"
 #include "KHttpRequest.h"
+#include "kfiber.h"
 #include "kselector_manager.h"
 #include "kmalloc.h"
 #include "KHttpObjectHash.h"
@@ -75,6 +76,22 @@ KTHREAD_FUNCTION crash_report_thread(void* arg);
 #ifdef ENABLE_VH_FLOW
 volatile bool flushFlowFlag = false;
 time_t lastFlushFlowTime = time(NULL);
+static int dump_flow_fiber(void* arg, int got) {
+	conf.gvm->dumpFlow();
+	return 0;
+}
+/*
+ * dumpFlow takes the virtual host fiber mutex, which needs a fiber.
+ * The gc thread has none, so run it in a fiber and wait for it.
+ */
+static void dump_flow_sync() {
+	kfiber* fiber = NULL;
+	if (kfiber_create_sync(dump_flow_fiber, NULL, 0, 0, &fiber) != 0) {
+		return;
+	}
+	int ret = 0;
+	kfiber_join(fiber, &ret);
+}
 #endif
 void register_gc_service(void(*flush)(void*, time_t), void* arg) {
 	kgl_gc_service* gs = new kgl_gc_service;
@@ -207,8 +224,8 @@ KTHREAD_FUNCTION time_thread(void* arg) {
 			flushFlowFlag = true;
 		}
 		if (flushFlowFlag) {
-			conf.gvm->dumpFlow();
 			flushFlowFlag = false;
+			dump_flow_sync();
 		}
 #endif
 		spProcessManage.refresh(nowTime);
