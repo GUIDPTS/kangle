@@ -43,7 +43,11 @@ private:
 	volatile bool write_is_end;
 };
 
-bool new_tempfile_input_stream(kgl_input_stream* in);
+/*
+ * Read the whole request body into a temp file. max_size > 0 limits the
+ * body size; when it is exceeded, false is returned and *too_large is set.
+ */
+bool new_tempfile_input_stream(kgl_input_stream* in, int64_t max_size = 0, bool* too_large = nullptr);
 bool tee_tempfile_body(kgl_response_body * body);
 //读post数据到临时文件
 KTHREAD_FUNCTION clean_tempfile_thread(void *param);

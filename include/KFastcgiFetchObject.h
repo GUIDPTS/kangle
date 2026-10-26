@@ -49,6 +49,8 @@ private:
 		uint32_t flags;
 	};
 	ks_buffer* split_header;
+	/* the empty FCGI_STDIN record ends the body and must be sent once */
+	bool stdin_end_sent;
 protected:
 };
 #endif /* KFASTCGIFETCHOBJECT_H_ */

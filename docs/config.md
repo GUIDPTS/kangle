@@ -96,7 +96,7 @@
 | `min_free_thread` | 最少空闲线程数。 |
 | `upstream_sign` | 写入上游请求的签名字符串。 |
 | `read_hup` | 是否响应 HUP 触发的重载，`0`/`1`。 |
-| `max_post_size` | 最大 POST 数据量，支持大小单位；仅相应构建功能启用时有效。 |
+| `max_post_size` | 长度未知的请求体（chunked 或未带 Content-Length 的 HTTP/2/3 上传）转发给 FastCGI（如 PHP）前会先写入临时文件，此项限制其大小，超过返回 413；`0` 表示不限制，默认 8M，支持大小单位。带 Content-Length 的请求体直接转发，不受此项限制。 |
 | `flush_flow_time` | 流量统计刷新周期；仅流量统计构建可用。 |
 | `process_cpu_usage` | 进程 CPU 使用限制；仅相应构建可用。 |
 | `log_drill` | 日志 drill 数值，解析范围为 `0`～`65536`；仅相应构建可用。 |

@@ -68,6 +68,8 @@ private:
 	unsigned char parseMessage(KHttpRequest* rq, KHttpObject* obj, KAjpMessageParser* msg);
 	int body_len;
 	bool end_request_recved;
+	/* the empty body packet only ends an unknown-length body */
+	bool post_length_unknown;
 };
 
 #endif /* KAJPFETCHOBJECT_H_ */

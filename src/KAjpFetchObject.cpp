@@ -69,6 +69,7 @@ static kgl_str_t ajp_response_headers[MAX_AJP_RESPONSE_HEADERS] = {
 KAjpFetchObject::KAjpFetchObject() {
 	body_len = 0;
 	end_request_recved = false;
+	post_length_unknown = false;
 }
 
 KAjpFetchObject::~KAjpFetchObject() {
@@ -79,6 +80,7 @@ KGL_RESULT KAjpFetchObject::buildHead(KHttpRequest* rq)
 	assert(buffer == NULL);
 	buffer = new KSocketBuffer(AJP_BUFF_SIZE);
 	pop_header.proto = Proto_ajp;
+	post_length_unknown = in->f->body.get_left(in->body_ctx) < 0;
 	char tmpbuff[50];
 	KHttpObject* obj = rq->ctx.obj;
 	KBIT_SET(obj->index.flags, ANSW_LOCAL_SERVER);
@@ -238,6 +240,11 @@ void KAjpFetchObject::BuildPostEnd()
 }
 KGL_RESULT KAjpFetchObject::on_post_end()
 {
+	if (!post_length_unknown) {
+		// the container reads exactly Content-Length bytes; an extra
+		// empty packet would be parsed as the next request.
+		return KGL_OK;
+	}
 	unsigned char pkt[4] = { 0x12, 0x34, 0, 0 };
 	return client->write_all((const char*)pkt, 4) == 0 ? KGL_OK : KGL_ECAN_RETRY_SOCKET_BROKEN;
 }

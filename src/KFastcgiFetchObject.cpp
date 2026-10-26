@@ -31,12 +31,14 @@
 #include "KHttpBasicAuth.h"
 #include "KApiRedirect.h"
 #include "KTempFile.h"
+#include "HttpFiber.h"
 #include "kmalloc.h"
 #define PTR_LEN(end,start) ((u_char *)end - (u_char *)start)
 KFastcgiFetchObject::KFastcgiFetchObject() : KAsyncFetchObject(KGL_UPSTREAM_NEED_TMP_FILE|KGL_UPSTREAM_NEED_QUEUE)
 {
 	flags = 0;
 	split_header = nullptr;
+	stdin_end_sent = false;
 }
 KFastcgiFetchObject::~KFastcgiFetchObject() {
 	if (split_header) {
@@ -45,13 +47,22 @@ KFastcgiFetchObject::~KFastcgiFetchObject() {
 }
 KGL_RESULT KFastcgiFetchObject::buildHead(KHttpRequest* rq)
 {
+	stdin_end_sent = false;
 #ifdef ENABLE_TF_EXCHANGE
 	// Ordinary CGI applications (including PHP) require CONTENT_LENGTH.
 	// Buffer decoded chunked/H2 bodies before building the FastCGI parameters.
 	// API children have their own unknown-length protocol and must stay streaming.
 	if (!is_extend() && in->f->body.get_left(in->body_ctx) < 0) {
-		if (!new_tempfile_input_stream(in)) {
-			return KGL_EUNKNOW;
+		// max_post_size bounds the temp file; 0 means no limit.
+		bool too_large = false;
+		if (!new_tempfile_input_stream(in, conf.max_post_size, &too_large)) {
+			if (!too_large) {
+				return KGL_EUNKNOW;
+			}
+			// The rest of the body is unread, so the connection cannot be reused.
+			KBIT_SET(rq->sink->data.flags, RQ_CONNECTION_CLOSE);
+			KGL_RESULT result = send_error2(rq, 413, "request body is larger than max_post_size");
+			return result == KGL_OK ? KGL_EHAS_SEND_HEADER : result;
 		}
 	}
 #endif
@@ -255,9 +266,16 @@ void KFastcgiFetchObject::appendPostEnd()
 	fcgiheader->contentLength = 0;
 	fcgiheader->requestIdB0 = 1;
 	buffer->Append(fcgibuff);
+	stdin_end_sent = true;
 }
 KGL_RESULT KFastcgiFetchObject::on_post_end()
 {
+	if (stdin_end_sent) {
+		// buildPost already ended a known-length body; a second empty
+		// FCGI_STDIN makes php-fpm drop the kept-alive connection.
+		return KGL_OK;
+	}
+	stdin_end_sent = true;
 	FCGI_Header header;
 	memset(&header, 0, sizeof(header));
 	header.version = 1;

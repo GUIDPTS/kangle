@@ -192,7 +192,10 @@ static kgl_input_stream_function tempfile_input_stream_function = {
 	forward_get_header_count,
 	forward_get_header,
 };
-bool new_tempfile_input_stream(kgl_input_stream* in) {
+bool new_tempfile_input_stream(kgl_input_stream* in, int64_t max_size, bool* too_large) {
+	if (too_large) {
+		*too_large = false;
+	}
 	if ((in)->f->body.get_left(in->body_ctx) == 0) {
 		return true;
 	}
@@ -206,7 +209,7 @@ bool new_tempfile_input_stream(kgl_input_stream* in) {
 		delete st;
 		return false;
 	}
-	bool result = false;
+	int64_t total = 0;
 	while ((in)->f->body.get_left(in->body_ctx) != 0) {
 		int got = in->f->body.read(in->body_ctx, buf, TEMPFILE_POST_CHUNK_SIZE);
 		if (got < 0) {
@@ -214,6 +217,13 @@ bool new_tempfile_input_stream(kgl_input_stream* in) {
 		}
 		if (got == 0) {
 			break;
+		}
+		total += got;
+		if (max_size > 0 && total > max_size) {
+			if (too_large) {
+				*too_large = true;
+			}
+			goto err;
 		}
 		if (!st->tmp_file.write_all(buf, got)) {
 			goto err;
