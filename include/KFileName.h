@@ -152,6 +152,10 @@ public:
 	{
 		return buf.st_size;
 	}
+	const struct _stat64* get_stat() const
+	{
+		return &buf;
+	}
 	static char *makeExt(const char *file);
 	const char *getExt();
 	

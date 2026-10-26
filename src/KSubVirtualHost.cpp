@@ -7,6 +7,10 @@
 #include <vector>
 #include <string.h>
 #include <sstream>
+#include <mutex>
+#include <unordered_map>
+#include <algorithm>
+#include <iterator>
 #include "KVirtualHost.h"
 #include "KSubVirtualHost.h"
 #include "KHtAccess.h"
@@ -476,12 +480,139 @@ bool KSubVirtualHost::bindFile(KHttpRequest* rq, bool& exsit, bool searchDefault
 	}
 	return true;
 }
+namespace {
+	/*
+	 * Parsed .htaccess files. Parsing compiles every regex, which costs
+	 * milliseconds for a large file, so requests reuse the result until the
+	 * file changes.
+	 */
+	struct KHtaccessCacheEntry
+	{
+		KApacheHtaccessContext ctx;
+		int64_t size;
+		time_t mtime;
+		time_t ctime;
+		long mtime_nsec;
+		uint64_t ino;
+		uint64_t dev;
+		time_t last_used;
+	};
+	constexpr int64_t htaccess_cache_max_memory = 64 * 1024 * 1024;
+	constexpr time_t htaccess_cache_idle = 300;
+	constexpr time_t htaccess_cache_sweep_interval = 60;
+	std::mutex htaccess_cache_lock;
+	// Never freed, so destroying contexts does not happen during process exit.
+	std::unordered_map<std::string, KHtaccessCacheEntry>* htaccess_cache = new std::unordered_map<std::string, KHtaccessCacheEntry>;
+	int64_t htaccess_cache_memory = 0;
+	time_t htaccess_cache_swept = 0;
+
+	// Estimated memory of a parsed file, measured on Linux: about 16KB for the
+	// access objects plus 90 times the file size, mostly JIT-compiled regex code.
+	int64_t htaccess_memory(int64_t size) {
+		return 16384 + size * 90;
+	}
+	long stat_mtime_nsec(const struct _stat64* st) {
+#ifdef __linux__
+		return st->st_mtim.tv_nsec;
+#else
+		return 0;
+#endif
+	}
+	bool htaccess_cache_match(const KHtaccessCacheEntry& e, const struct _stat64* st) {
+		// ctime also changes on chmod, so a file that could not be read is retried.
+		return e.size == (int64_t)st->st_size && e.mtime == st->st_mtime && e.ctime == st->st_ctime
+			&& e.mtime_nsec == stat_mtime_nsec(st) && e.ino == (uint64_t)st->st_ino && e.dev == (uint64_t)st->st_dev;
+	}
+	// The functions below are called with htaccess_cache_lock held. Contexts are
+	// moved to dropped so they are destroyed after the lock is released.
+	void htaccess_cache_erase(std::unordered_map<std::string, KHtaccessCacheEntry>::iterator it, std::vector<KApacheHtaccessContext>& dropped) {
+		htaccess_cache_memory -= htaccess_memory(it->second.size);
+		dropped.push_back(std::move(it->second.ctx));
+		htaccess_cache->erase(it);
+	}
+	// Make room for a new entry that needs memory bytes.
+	void htaccess_cache_sweep(time_t now, int64_t memory, std::vector<KApacheHtaccessContext>& dropped) {
+		bool full = htaccess_cache_memory + memory > htaccess_cache_max_memory;
+		if (!full && now - htaccess_cache_swept < htaccess_cache_sweep_interval) {
+			return;
+		}
+		htaccess_cache_swept = now;
+		for (auto it = htaccess_cache->begin(); it != htaccess_cache->end();) {
+			auto next = std::next(it);
+			if (now - it->second.last_used > htaccess_cache_idle) {
+				htaccess_cache_erase(it, dropped);
+			}
+			it = next;
+		}
+		if (htaccess_cache_memory + memory <= htaccess_cache_max_memory) {
+			return;
+		}
+		// Still full: drop the least recently used entries down to 3/4 of the limit.
+		std::vector<std::pair<time_t, std::string>> order;
+		order.reserve(htaccess_cache->size());
+		for (auto& it : *htaccess_cache) {
+			order.emplace_back(it.second.last_used, it.first);
+		}
+		std::sort(order.begin(), order.end());
+		for (auto& o : order) {
+			if (htaccess_cache_memory + memory <= htaccess_cache_max_memory * 3 / 4) {
+				break;
+			}
+			htaccess_cache_erase(htaccess_cache->find(o.second), dropped);
+		}
+	}
+}
 KApacheHtaccessContext KSubVirtualHost::make_htaccess(const char* prefix, KFileName* file) {
+	// file was found with lstat and symlinks refused, so this is the file itself.
+	const struct _stat64* st = file->get_stat();
+	std::string key(file->getName());
+	key.push_back('\0');
+	key.append(prefix);
+	time_t now = kgl_current_sec;
+	std::vector<KApacheHtaccessContext> dropped;
+	{
+		std::lock_guard<std::mutex> guard(htaccess_cache_lock);
+		auto it = htaccess_cache->find(key);
+		if (it != htaccess_cache->end()) {
+			if (htaccess_cache_match(it->second, st)) {
+				it->second.last_used = now;
+				return it->second.ctx;
+			}
+			htaccess_cache_erase(it, dropped);
+		}
+	}
+	dropped.clear();
 	KApacheHtaccessContext ctx(new _KApacheHtaccessContext(file->getName(), prefix));
 	try {
 		ctx->file->reload(true);
 	} catch (std::exception& e) {
 		klog(KLOG_ERR, "load htaccess file error [%s]\n", e.what());
+	}
+	// A second edit within the same second may keep the same mtime and size,
+	// so a file that changed just now is not cached yet.
+	time_t changed = st->st_mtime > st->st_ctime ? st->st_mtime : st->st_ctime;
+	int64_t memory = htaccess_memory((int64_t)st->st_size);
+	if (now - changed < 2 || memory > htaccess_cache_max_memory / 4) {
+		return ctx;
+	}
+	{
+		std::lock_guard<std::mutex> guard(htaccess_cache_lock);
+		// another request may have cached the same file meanwhile
+		auto it = htaccess_cache->find(key);
+		if (it != htaccess_cache->end()) {
+			htaccess_cache_erase(it, dropped);
+		}
+		htaccess_cache_sweep(now, memory, dropped);
+		auto& e = (*htaccess_cache)[key];
+		htaccess_cache_memory += memory;
+		e.ctx = ctx;
+		e.size = (int64_t)st->st_size;
+		e.mtime = st->st_mtime;
+		e.ctime = st->st_ctime;
+		e.mtime_nsec = stat_mtime_nsec(st);
+		e.ino = (uint64_t)st->st_ino;
+		e.dev = (uint64_t)st->st_dev;
+		e.last_used = now;
 	}
 	return ctx;
 }

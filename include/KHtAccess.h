@@ -135,5 +135,6 @@ struct _KApacheHtaccessContext
 		assert(ev.empty());
 	}
 };
-using KApacheHtaccessContext = std::unique_ptr< _KApacheHtaccessContext>;
+// Shared because parsed .htaccess files are cached and reused by requests.
+using KApacheHtaccessContext = std::shared_ptr< _KApacheHtaccessContext>;
 #endif /* KHTACCESS_H_ */

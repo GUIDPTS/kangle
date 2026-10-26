@@ -465,7 +465,7 @@ DSO 开发接口见 [dso.md](./dso.md)。
 | `inherit` | 是否继承 `vhs`，`0`/`1` 或 `off`/`on`。 |
 | early_hints | 上游 103 Early Hints 转发，`0`/`1` 或 `off`/`on`/`h2` |
 | `access` | 独立访问控制文件路径。 |
-| `htaccess` | htaccess 文件名/路径。 |
+| `htaccess` | htaccess 文件名/路径。解析结果会缓存，文件修改后下一个请求即生效；缓存总量约 64MB，超出时淘汰最久未用的文件。 |
 | `envs` | 虚拟主机环境变量列表，使用项目的环境变量格式。 |
 | `status` | `0` 为正常，非 `0` 为关闭。 |
 | `app`、`app_share`、`ip_hash` | 应用隔离、应用共享和哈希相关设置。 |

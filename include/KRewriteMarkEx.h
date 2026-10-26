@@ -172,6 +172,8 @@ public:
 	bool qsa;
 	char *proxy;
 	int code;
+	// answer with this status when the rule matches ([F] and [G]), 0 if not
+	int status;
 };
 class KRewriteMarkEx: public KMark {
 public:

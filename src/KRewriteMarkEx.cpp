@@ -10,6 +10,7 @@
 #include "KCdnContainer.h"
 #include "kmalloc.h"
 #include "KBufferFetchObject.h"
+#include "KStatusCodeMark.h"
 
 bool check_path_info(const char *file,struct _stat64 *buf)
 {
@@ -44,6 +45,7 @@ KRewriteRule::KRewriteRule() {
 	internal = true;
 	revert = false;
 	code = 0;
+	status = 0;
 }
 KRewriteRule::~KRewriteRule() {
 	if (dst) {
@@ -72,6 +74,9 @@ void KRewriteRule::buildXml(std::stringstream &s)
 	if (!internal && code>0) {
 		s << " code='" << code << "'";
 	}
+	if (status > 0) {
+		s << " status='" << status << "'";
+	}
 }
 bool KRewriteRule::parse(const KXmlAttribute& attribute)
 {
@@ -89,6 +94,10 @@ bool KRewriteRule::parse(const KXmlAttribute& attribute)
 		internal = false;
 	}
 	code = atoi(attribute["code"].c_str());
+	status = atoi(attribute["status"].c_str());
+	if (status < 200 || status > 599) {
+		status = 0;
+	}
 	if (proxy) {
 		xfree(proxy);
 		proxy = NULL;
@@ -145,6 +154,18 @@ uint32_t KRewriteRule::mark(KHttpRequest *rq, KHttpObject *obj,
 			}
 			delete str;
 		}
+	}
+	if (result && status > 0) {
+		// like Apache, [F] and [G] ignore the substitution
+		if (subString) {
+			delete subString;
+		}
+		if (lastCond) {
+			delete lastCond;
+		}
+		KBIT_SET(rq->ctx.filter_flags, RF_NO_CACHE);
+		fo.reset(new KStatusCodeSource((uint16_t)status));
+		return KF_STATUS_REQ_TRUE;
 	}
 	if (!result || dst == NULL || strcmp(dst, "-") == 0) {
 		if (subString) {
